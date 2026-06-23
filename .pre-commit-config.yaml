@@ -1,0 +1,236 @@
+---
+# Copyright (c) 2026 IndyKite
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Usage & installation, the first configures the default stages only, the others must be installed explicitly:
+#   pre-commit install
+#   pre-commit install -t post-checkout -t commit-msg
+#
+# Prerequisites:
+#   - if using 'make install-tools', then '~/go/bin' must be added to $PATH in ~/.bash_profile
+#   ! hard dependency on 'ops-common' repo being in the same root folder, so shareable commitlint config can be used!
+#   brew install pre-commit yamlfmt yamllint actionlint markdownlint-cli2 shellcheck shfmt checkov trivy go gci golangci-lint hadolint
+#
+# Update hooks and their dependencies regularly via:
+#   (remote) pre-commit autoupdate --freeze --jobs $(getconf _NPROCESSORS_ONLN)
+#   (local) brew update && brew upgrade -g
+#
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+
+default_stages: [pre-commit, pre-push]
+default_install_hook_types: [pre-commit]
+fail_fast: false
+minimum_pre_commit_version: 4.0.0
+
+#
+repos:
+  - repo: meta
+    hooks:
+      # - id: check-hooks-apply
+      - id: check-useless-excludes
+        name: pre-commit/check-useless-excludes
+
+  - repo: ssh://git@github.com/indykite/ops-common
+    rev: "3c7e44dc548e6f490a58b5d55393580c896598d7" # using a branch name (or HEAD) is not supported
+    hooks:
+      # POST-CHECKOUT
+      # install explicitly with: pre-commit install -t post-checkout
+      - id: git-pull
+      - id: git-branch-delete-stale
+
+      # pre-commit validations
+      - id: pre-commit-validate-config
+      - id: pre-commit-validate-manifest
+
+      # SAST
+      - id: trivy
+
+      # Shellcheck
+      - id: shfmt
+      - id: shellcheck
+
+  #
+  # Renovate
+  - repo: https://github.com/renovatebot/pre-commit-hooks # ci:ignore:OK to validate locally only, otherwise it adds 850MB+ to unpacked cache
+    rev: "cbf190d5e31b9e0845b3fb1c0af190927b46e5e3" # frozen: 43.141.2
+    hooks:
+      - id: renovate-config-validator
+        args: [--strict]
+
+  #
+  # Commit Message linting
+  # DISABLED: the shared config lives in a sibling 'ops-common' checkout
+  # (../ops-common/...), which isn't present for this repo's layout. Re-enable
+  # once ops-common is available as a sibling or a local commitlint config is added.
+  # - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook # ci:ignore:executed under a separate GitHub action
+  #   rev: 1d7031e6d0bbfce76e5a625b0cec24fb22e517a0 # frozen: v9.25.0
+  #   hooks:
+  #     # NON-DEFAULT stage, install explicitly with: pre-commit install -t commit-msg
+  #     - id: commitlint
+  #       stages: [commit-msg]
+  #       # using shareable config across the org
+  #       # 'strict' equals to 'failOnWarnings' in Github Action setting
+  #       args: ["--strict", "--config", "../ops-common/.github/actions/commitlint/.commitlintrc.mjs"]
+  #       additional_dependencies:
+  #         - "@commitlint/config-conventional"
+  #         - commitlint-plugin-function-rules
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
+    hooks:
+      # Git style
+      - id: check-added-large-files
+        args: [--maxkb=1500]
+      - id: check-merge-conflict
+      - id: check-vcs-permalinks
+      - id: forbid-new-submodules
+      # - id: forbid-submodules # XXX: either of two is enough
+      - id: no-commit-to-branch
+        name: no-commit-to-master
+        args: [--branch, dev, --branch, develop, --branch, master, --branch, main]
+
+      # Common errors
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: check-symlinks
+      - id: destroyed-symlinks
+
+      # Cross platform
+      - id: check-illegal-windows-names
+      - id: check-case-conflict
+      - id: fix-byte-order-marker
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+      # Format linters
+      # 'check-yaml' and 'sort-simple-yaml' disabled intentionally, use hooks below
+      - id: check-xml
+      - id: check-toml
+      - id: check-json
+      - id: pretty-format-json
+        args: [--no-sort-keys, --autofix]
+
+      # Security
+      - id: detect-private-key
+        exclude: ^README.md$
+      - id: detect-aws-credentials
+        args: [--allow-missing-credentials]
+
+  #
+  # Detect hardcoded secrets
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # frozen: v8.30.1
+    hooks:
+      - id: gitleaks
+        name: gitleaks
+
+  #
+  # YAML
+  - repo: https://github.com/rhysd/actionlint
+    rev: 914e7df21a07ef503a81201c76d2b11c789d3fca # frozen: v1.7.12
+    hooks:
+      # place any overrides in '.actionlint.yaml' https://github.com/rhysd/actionlint/blob/main/docs/config.md
+      #  args: ["-config-file=.actionlint.yaml"]
+      - id: actionlint-system
+        name: github-actionlint
+  - repo: https://github.com/google/yamlfmt
+    rev: 21ca5323a9c87ee37a434e0ca908efc0a89daa07 # frozen: v0.21.0
+    hooks:
+      - id: yamlfmt
+        language: system
+  - repo: https://github.com/adrienverge/yamllint
+    rev: cba56bcde1fdd01c1deb3f945e69764c291a6530 # frozen: v1.38.0
+    hooks:
+      - id: yamllint
+        language: system
+        args: ["--strict"]
+
+  - repo: https://github.com/hadolint/hadolint # language: system
+    rev: 57e1618d78fd469a92c1e584e8c9313024656623 # frozen: v2.14.0
+    hooks:
+      - id: hadolint
+        name: hadolint/dockerfile
+
+  #
+  # IaC in general
+  # - repo: https://github.com/bridgecrewio/checkov <- "language: python" slower & takes larger CI cache comparing to "system"
+  #   rev: "3.2.483"
+  - repo: local
+    hooks:
+      - id: checkov # checkov_diff
+        name: iac/checkov
+        language: system
+        entry: checkov
+        args: ["-f"] # required and must come last
+        # config's 'skip-path' doesn't work with '-f', hence direct exclusion
+        exclude: ^.*\.go$
+
+  #
+  # Markdown
+  # - repo: https://github.com/DavidAnson/markdownlint-cli2 <- "language: node" slower & takes larger CI cache comparing to "system"
+  #   rev: v0.18.1
+  - repo: local
+    hooks:
+      - id: markdownlint
+        name: markdownlint
+        language: system
+        entry: markdownlint-cli2
+        types: [markdown]
+
+  #
+  # Golang
+  - repo: local
+    hooks:
+      - id: golang-fmt
+        name: golang-fmt
+        entry: make fmt # gofmt -s -w $(go list -f "{{.Dir}}" ./...)
+        files: '\.go$'
+        description: "Runs 'gofmt', requires golang"
+        language: system
+        pass_filenames: false
+
+      - id: golang-gci
+        name: golang-gci
+        entry: make gci
+        files: '\.go$'
+        description: "Requires and runs 'gci', control package import order and make it always deterministic"
+        language: system
+        pass_filenames: false
+
+      - id: golangci-lint-validate-config
+        name: golangci-lint/validate-config
+        entry: golangci-lint config verify
+        files: '\.golangci\.(y?ml|toml|json)$'
+        language: system
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: golangci-lint run ./...
+        files: '\.go$'
+        description: "Requires and runs 'golangci-lint', fast linters runner for golang; strict mode against new changes only"
+        language: system
+        pass_filenames: false # golangci-lint detects those automatically
+
+      - id: go_test
+        name: go-tests
+        entry: make test
+        language: system
+        pass_filenames: false
+        types_or: [go, go-mod, go-sum]
+        always_run: false

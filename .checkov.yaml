@@ -1,0 +1,20 @@
+---
+compact: true
+quiet: true # otherwise inline 'checkov:skip=' won't work
+summary-position: top
+download-external-modules: false
+evaluate-variables: false
+output: cli
+skip-results-upload: true
+framework:
+  - all
+
+dockerfile-path: Dockerfile
+
+# "Ignored with -f / --file", which might be given by pre-commit directly, so had to be specified in its config as well
+skip-path:
+  - .*\.go$ # covered via golangci
+
+skip-check:
+  - CKV_SECRET_6 # TODO: false positive in many cases, with no possibility to exclude per file / https://github.com/bridgecrewio/checkov/issues/5405
+  - CKV_GHA_2 # ensure run commands are not vulnerable to shell injection - temp exclusion, will be re-worked later

@@ -1,0 +1,9 @@
+---
+default: true
+MD007: # ul-indent
+  indent: 4
+MD013: # line-length
+  line_length: 300
+  code_blocks: false
+MD033: # no-inline-html
+  allowed_elements: [details, summary]
