@@ -1,0 +1,17 @@
+---
+# not all inline exclusions are supported by trivy:
+#   "Ignoring via inline comments works only for rules that are attached to a specific resource.
+#    ... Since there is no resource to attach a '#trivy:ignore' comment to, inline ignoring cannot be applied."
+#   https://github.com/aquasecurity/trivy/issues/9463#issuecomment-3334906105
+#
+# Path-based ignores - paths must match trivy's reported paths when scanning from repo root
+#
+# vulnerabilities:
+#   - id: CVE-XXXX-XXXXX
+#     statement: reason for ignoring
+#
+# misconfigurations:
+#   - id: DS-0002
+#     statement: reason for ignoring
+#     paths:
+#       - path/to/Dockerfile

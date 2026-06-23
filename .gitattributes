@@ -1,0 +1,4 @@
+# This defines files as generated, so they will not expand diff in Github
+
+# Mocks
+*_mock.go linguist-generated=true

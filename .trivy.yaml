@@ -1,0 +1,54 @@
+---
+# https://trivy.dev/latest/docs/references/configuration/config-file/
+report: "all"
+exit-code: 1
+insecure: false
+debug: false
+quiet: true
+timeout: 10m
+dependency-tree: true
+list-all-pkgs: true
+format: "table"
+
+ignorefile: ".trivyignore.yaml"
+
+severity:
+  - UNKNOWN
+  - LOW
+  - MEDIUM
+  - HIGH
+  - CRITICAL
+
+scan:
+  detection-priority: "precise"
+  disable-telemetry: true
+  offline: true
+  scanners:
+    - vuln
+    - secret
+    - misconfig
+  skip-dirs: ["**/.terraform/**", "**/.terragrunt-cache/**", "**/node_modules/**", "**/.local-scratch/**"]
+  show-suppressed: true
+
+vulnerability:
+  ignore-unfixed: true
+
+misconfiguration:
+  include-non-failures: false
+  scanners:
+    - dockerfile
+    - helm
+    - kubernetes
+    - terraform
+    - terraformplan-json
+    - terraformplan-snapshot
+
+  terraform:
+    exclude-downloaded-modules: true
+
+rego:
+  # Same as '--config-data'
+  data: [.trivy_data.yaml]
+
+pkg:
+  include-dev-deps: true # supported: npm, yarn, gradle

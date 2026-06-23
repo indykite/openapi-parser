@@ -1,0 +1,14 @@
+version = 1
+
+test_patterns = [
+  "**/*_test.go",
+  "test/**",
+  "**/testdata/**",
+]
+
+[[analyzers]]
+name = "go"
+
+  [analyzers.meta]
+  import_root = "github.com/indykite/openapi-parser"
+  cyclomatic_complexity_threshold = "critical"
