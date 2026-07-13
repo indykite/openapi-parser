@@ -19,6 +19,8 @@ package gen
 import (
 	"encoding/json"
 	"maps"
+	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -43,8 +45,14 @@ func (api *API) Emit(opt EmitOptions) map[string]any {
 		"info":    emitInfo(&api.Info),
 	}
 	maps.Copy(doc, api.Extensions)
+	if is32 && api.Self != "" {
+		doc["$self"] = api.Self
+	}
 	if len(api.Servers) > 0 {
-		doc["servers"] = emitServers(api.Servers)
+		doc["servers"] = emitServers(api.Servers, api.Schemes, is32)
+	}
+	if len(api.Security) > 0 {
+		doc["security"] = emitSecurityReqs(api.Security)
 	}
 	if len(api.Tags) > 0 {
 		doc["tags"] = emitTags(api.Tags, is32)
@@ -53,7 +61,18 @@ func (api *API) Emit(opt EmitOptions) map[string]any {
 		doc["externalDocs"] = emitExtDocs(api.ExternalDocs)
 	}
 
-	doc["paths"] = emitPaths(api.Operations, api.Produces(), is32)
+	var pathOps, hookOps []Operation
+	for i := range api.Operations {
+		if api.Operations[i].Webhook != "" {
+			hookOps = append(hookOps, api.Operations[i])
+		} else {
+			pathOps = append(pathOps, api.Operations[i])
+		}
+	}
+	doc["paths"] = emitPaths(pathOps, api.Produces(), is32)
+	if len(hookOps) > 0 {
+		doc["webhooks"] = emitWebhooks(hookOps, api.Produces(), is32)
+	}
 
 	components := map[string]any{}
 	if len(api.Schemas) > 0 {
@@ -78,6 +97,7 @@ func (api *API) EmitJSON(opt EmitOptions) ([]byte, error) {
 
 func emitInfo(in *Info) map[string]any {
 	m := map[string]any{"title": in.Title, "version": in.Version}
+	put(m, "summary", in.Summary)
 	if in.Description != "" {
 		m["description"] = in.Description
 	}
@@ -94,23 +114,54 @@ func emitInfo(in *Info) map[string]any {
 	if l := in.License; l != (License{}) {
 		lm := map[string]any{}
 		put(lm, "name", l.Name)
+		put(lm, "identifier", l.Identifier)
 		put(lm, "url", l.URL)
 		m["license"] = lm
 	}
 	return m
 }
 
-func emitServers(servers []Server) []any {
+func emitServers(servers []Server, schemes []string, is32 bool) []any {
+	if len(schemes) == 0 {
+		schemes = []string{"https"}
+	}
 	out := make([]any, 0, len(servers))
-	for _, s := range servers {
-		url := s.URL
-		// foldServer may leave a protocol-relative // prefix; default to https.
-		if strings.HasPrefix(url, "//") {
-			url = "https:" + url
+	for i := range servers {
+		s := &servers[i]
+		urls := []string{s.URL}
+		// foldServer leaves host-derived URLs protocol-relative (// prefix);
+		// expand those into one server per @schemes entry (default https).
+		if strings.HasPrefix(s.URL, "//") {
+			urls = urls[:0]
+			for _, scheme := range schemes {
+				urls = append(urls, scheme+":"+s.URL)
+			}
 		}
-		sm := map[string]any{"url": url}
-		put(sm, "description", s.Description)
-		out = append(out, sm)
+		for _, url := range urls {
+			sm := map[string]any{"url": url}
+			put(sm, "description", s.Description)
+			if is32 && len(urls) == 1 {
+				// name must be unique, so never stamp it on scheme-expanded copies
+				put(sm, "name", s.Name)
+			}
+			if len(s.Variables) > 0 {
+				sm["variables"] = emitServerVariables(s.Variables)
+			}
+			out = append(out, sm)
+		}
+	}
+	return out
+}
+
+func emitServerVariables(vars map[string]ServerVariable) map[string]any {
+	out := map[string]any{}
+	for name, v := range vars {
+		vm := map[string]any{"default": v.Default}
+		if len(v.Enum) > 0 {
+			vm["enum"] = toAnySlice(v.Enum)
+		}
+		put(vm, "description", v.Description)
+		out[name] = vm
 	}
 	return out
 }
@@ -149,27 +200,47 @@ func emitPaths(ops []Operation, produce string, is32 bool) map[string]any {
 			item = map[string]any{}
 			paths[op.Path] = item
 		}
-		opObj := emitOperation(op, produce, is32)
-
-		switch {
-		case op.Method == "query" && is32:
-			item["query"] = opObj // 3.2 first-class
-		case isStandardMethod(op.Method):
-			item[op.Method] = opObj
-		case is32:
-			// non-standard verb => additionalOperations (3.2)
-			addl, ok := item["additionalOperations"].(map[string]any)
-			if !ok {
-				addl = map[string]any{}
-				item["additionalOperations"] = addl
-			}
-			addl[strings.ToUpper(op.Method)] = opObj
-		default:
-			// 3.1 downgrade: best effort, treat query as post
-			item["post"] = opObj
-		}
+		placeOperation(item, op, emitOperation(op, produce, is32), is32)
 	}
 	return paths
+}
+
+// emitWebhooks groups webhook operations into the top-level webhooks map:
+// name -> path item (3.1+).
+func emitWebhooks(ops []Operation, produce string, is32 bool) map[string]any {
+	hooks := map[string]any{}
+	for i := range ops {
+		op := &ops[i]
+		item, ok := hooks[op.Webhook].(map[string]any)
+		if !ok {
+			item = map[string]any{}
+			hooks[op.Webhook] = item
+		}
+		placeOperation(item, op, emitOperation(op, produce, is32), is32)
+	}
+	return hooks
+}
+
+// placeOperation slots an operation object into a path item under the right
+// method key, honoring 3.2's first-class query and additionalOperations.
+func placeOperation(item map[string]any, op *Operation, opObj map[string]any, is32 bool) {
+	switch {
+	case op.Method == "query" && is32:
+		item["query"] = opObj // 3.2 first-class
+	case isStandardMethod(op.Method):
+		item[op.Method] = opObj
+	case is32:
+		// non-standard verb => additionalOperations (3.2)
+		addl, ok := item["additionalOperations"].(map[string]any)
+		if !ok {
+			addl = map[string]any{}
+			item["additionalOperations"] = addl
+		}
+		addl[strings.ToUpper(op.Method)] = opObj
+	default:
+		// 3.1 downgrade: best effort, treat query as post
+		item["post"] = opObj
+	}
 }
 
 func emitOperation(op *Operation, produce string, is32 bool) map[string]any {
@@ -183,6 +254,9 @@ func emitOperation(op *Operation, produce string, is32 bool) map[string]any {
 	if op.Deprecated {
 		m["deprecated"] = true
 	}
+	if op.ExternalDocs != nil {
+		m["externalDocs"] = emitExtDocs(op.ExternalDocs)
+	}
 	if len(op.Params) > 0 {
 		var params []any
 		for i := range op.Params {
@@ -190,15 +264,24 @@ func emitOperation(op *Operation, produce string, is32 bool) map[string]any {
 		}
 		m["parameters"] = params
 	}
-	if op.Body != nil {
-		ct := "application/json"
-		// (could derive from op.Consumes)
-		m["requestBody"] = map[string]any{
-			"required": op.Body.Required,
-			"content": map[string]any{
-				ct: map[string]any{"schema": emitSchema(op.Body.Schema)},
-			},
+	switch {
+	case op.Body != nil:
+		cts := op.Consumes
+		if len(cts) == 0 {
+			cts = []string{"application/json"}
 		}
+		content := map[string]any{}
+		for _, ct := range cts {
+			content[ct] = map[string]any{"schema": emitSchema(op.Body.Schema)}
+		}
+		body := map[string]any{
+			"required": op.Body.Required,
+			"content":  content,
+		}
+		put(body, "description", op.Body.Description)
+		m["requestBody"] = body
+	case len(op.Form) > 0:
+		m["requestBody"] = emitFormBody(op)
 	}
 	m["responses"] = emitResponses(op, produce, is32)
 	if len(op.Security) > 0 {
@@ -206,6 +289,40 @@ func emitOperation(op *Operation, produce string, is32 bool) map[string]any {
 	}
 	maps.Copy(m, op.Extensions)
 	return m
+}
+
+// emitFormBody assembles formData params into one form request body: an
+// object schema with a property per field, under the operation's declared
+// form media type (multipart/form-data unless @Accept says urlencoded).
+func emitFormBody(op *Operation) map[string]any {
+	ct := "multipart/form-data"
+	for _, c := range op.Consumes {
+		if c == "application/x-www-form-urlencoded" || c == "multipart/form-data" {
+			ct = c
+			break
+		}
+	}
+	schema := &Schema{Type: []string{"object"}, Properties: map[string]*Schema{}}
+	required := false
+	for i := range op.Form {
+		p := &op.Form[i]
+		fs := p.Schema
+		if fs == nil {
+			fs = &Schema{Type: []string{"string"}}
+		}
+		if p.Description != "" && fs.Description == "" {
+			fs.Description = p.Description
+		}
+		schema.Properties[p.Name] = fs
+		if p.Required {
+			schema.Required = append(schema.Required, p.Name)
+			required = true
+		}
+	}
+	return map[string]any{
+		"required": required,
+		"content":  map[string]any{ct: map[string]any{"schema": emitSchema(schema)}},
+	}
 }
 
 func emitParam(p *Param) map[string]any {
@@ -217,30 +334,50 @@ func emitParam(p *Param) map[string]any {
 	if p.Description != "" {
 		m["description"] = p.Description
 	}
+	// parameter-level attributes (the rest apply to the schema below)
+	if v, ok := p.Attributes["deprecated"]; ok && (v == "" || isTruthy(v)) {
+		m["deprecated"] = true
+	}
+	if v, ok := p.Attributes["style"]; ok {
+		m["style"] = v
+	}
+	if v, ok := p.Attributes["explode"]; ok {
+		m["explode"] = isTruthy(v)
+	}
+	if v, ok := p.Attributes["allowreserved"]; ok && (v == "" || isTruthy(v)) {
+		m["allowReserved"] = true
+	}
+	// schema-shaped attributes were applied at parse time (emit is pure)
 	schema := p.Schema
 	if schema == nil {
 		schema = &Schema{Type: []string{"string"}}
 	}
-	applyAttrs(schema, p.Attributes)
 	m["schema"] = emitSchema(schema)
 	return m
 }
 
 func emitResponses(op *Operation, produce string, is32 bool) map[string]any {
 	out := map[string]any{}
-	if len(op.Produces) > 0 {
-		produce = op.Produces[0]
+	produces := op.Produces
+	if len(produces) == 0 {
+		produces = []string{produce}
 	}
 	for _, r := range op.Responses {
-		respObj := map[string]any{"description": orDefault(r.Description, "")}
+		respObj := map[string]any{"description": responseDescription(&r)}
+		if is32 {
+			put(respObj, "summary", r.Summary)
+		}
 		if r.Schema != nil {
-			schemaKey := "schema"
-			if op.Streaming && is32 {
-				schemaKey = "itemSchema" // 3.2 streaming
+			content := map[string]any{}
+			for _, mt := range produces {
+				schemaKey := "schema"
+				if is32 && isSequentialMedia(mt) {
+					// 3.2 streaming: the schema describes each event/item
+					schemaKey = "itemSchema"
+				}
+				content[mt] = map[string]any{schemaKey: emitSchema(r.Schema)}
 			}
-			respObj["content"] = map[string]any{
-				produce: map[string]any{schemaKey: emitSchema(r.Schema)},
-			}
+			respObj["content"] = content
 		}
 		if len(r.Headers) > 0 {
 			hs := map[string]any{}
@@ -275,19 +412,39 @@ func emitSchema(s *Schema) map[string]any {
 		return map[string]any{"$ref": s.Ref}
 	}
 	m := map[string]any{}
+	if len(s.AnyOf) > 0 {
+		anyOf := make([]any, len(s.AnyOf))
+		for i, sub := range s.AnyOf {
+			anyOf[i] = emitSchema(sub)
+		}
+		m["anyOf"] = anyOf
+	}
 	if len(s.Type) == 1 {
 		m["type"] = s.Type[0]
 	} else if len(s.Type) > 1 {
 		m["type"] = toAnySlice(s.Type) // 3.1/3.2 type array
 	}
 	put(m, "format", s.Format)
+	put(m, "pattern", s.Pattern)
 	put(m, "description", s.Description)
 	if s.Example != nil {
 		m["example"] = s.Example
 	}
+	if s.Default != nil {
+		m["default"] = s.Default
+	}
 	if len(s.Enum) > 0 {
 		m["enum"] = s.Enum
 	}
+	putFloat(m, "minimum", s.Minimum)
+	putFloat(m, "maximum", s.Maximum)
+	putFloat(m, "exclusiveMinimum", s.ExclusiveMinimum)
+	putFloat(m, "exclusiveMaximum", s.ExclusiveMaximum)
+	putFloat(m, "multipleOf", s.MultipleOf)
+	putInt(m, "minLength", s.MinLength)
+	putInt(m, "maxLength", s.MaxLength)
+	putInt(m, "minItems", s.MinItems)
+	putInt(m, "maxItems", s.MaxItems)
 	if s.Items != nil {
 		m["items"] = emitSchema(s.Items)
 	}
@@ -304,6 +461,7 @@ func emitSchema(s *Schema) map[string]any {
 	if s.AdditionalProperties != nil {
 		m["additionalProperties"] = emitSchema(s.AdditionalProperties)
 	}
+	maps.Copy(m, s.Extensions)
 	return m
 }
 
@@ -324,28 +482,35 @@ func emitSecuritySchemes(schemes map[string]SecurityScheme, is32 bool) map[strin
 				m["deprecated"] = true
 			}
 		}
-		if len(s.Flows) > 0 {
-			flows := map[string]any{}
-			for fname, f := range s.Flows {
-				fm := map[string]any{}
-				put(fm, "authorizationUrl", f.AuthorizationURL)
-				put(fm, "tokenUrl", f.TokenURL)
-				put(fm, "refreshUrl", f.RefreshURL)
-				if is32 {
-					put(fm, "deviceAuthorizationUrl", f.DeviceAuthorizationURL)
-				}
-				if f.Scopes != nil {
-					fm["scopes"] = toAnyMap(f.Scopes)
-				} else {
-					fm["scopes"] = map[string]any{}
-				}
-				flows[fname] = fm
-			}
+		if flows := emitFlows(s.Flows, is32); len(flows) > 0 {
 			m["flows"] = flows
 		}
 		out[name] = m
 	}
 	return out
+}
+
+func emitFlows(in map[string]OAuthFlow, is32 bool) map[string]any {
+	flows := map[string]any{}
+	for fname, f := range in {
+		if fname == "deviceAuthorization" && !is32 {
+			continue // 3.2-only flow; 3.1 has no valid downgrade
+		}
+		fm := map[string]any{}
+		put(fm, "authorizationUrl", f.AuthorizationURL)
+		put(fm, "tokenUrl", f.TokenURL)
+		put(fm, "refreshUrl", f.RefreshURL)
+		if is32 {
+			put(fm, "deviceAuthorizationUrl", f.DeviceAuthorizationURL)
+		}
+		if f.Scopes != nil {
+			fm["scopes"] = toAnyMap(f.Scopes)
+		} else {
+			fm["scopes"] = map[string]any{}
+		}
+		flows[fname] = fm
+	}
+	return flows
 }
 
 func emitSecurityReqs(reqs []map[string][]string) []any {
@@ -362,26 +527,43 @@ func emitSecurityReqs(reqs []map[string][]string) []any {
 
 // --- attribute application ----------------------------------------------
 
+// applyAttrs attaches swag trailing attributes (`minimum(1) default(20)`) to a
+// parameter's schema. Scalar values are coerced to the schema's type.
 func applyAttrs(s *Schema, attrs map[string]string) {
 	if s == nil || len(attrs) == 0 {
 		return
 	}
-	if v, ok := attrs["enums"]; ok {
-		for e := range strings.SplitSeq(v, ",") {
-			s.Enum = append(s.Enum, strings.TrimSpace(e))
+	for k, v := range attrs {
+		switch k {
+		case "enums":
+			target := enumTarget(s)
+			for e := range strings.SplitSeq(v, ",") {
+				target.Enum = append(target.Enum, coerceScalar(strings.TrimSpace(e), target))
+			}
+		case "default":
+			s.Default = coerceScalar(v, s)
+		case "example":
+			s.Example = coerceScalar(v, s)
+		case "format":
+			s.Format = v
+		case "pattern":
+			s.Pattern = v
+		case "minimum":
+			s.Minimum = parseFloatPtr(v)
+		case "maximum":
+			s.Maximum = parseFloatPtr(v)
+		case "multipleof":
+			s.MultipleOf = parseFloatPtr(v)
+		case "minlength":
+			s.MinLength = parseIntPtr(v)
+		case "maxlength":
+			s.MaxLength = parseIntPtr(v)
+		case "minitems":
+			s.MinItems = parseIntPtr(v)
+		case "maxitems":
+			s.MaxItems = parseIntPtr(v)
 		}
 	}
-	if v, ok := attrs["default"]; ok {
-		s.Example = v // TODO: a real Default field on Schema
-	}
-	if v, ok := attrs["example"]; ok {
-		s.Example = v
-	}
-	if v, ok := attrs["format"]; ok {
-		s.Format = v
-	}
-	// numeric/length attributes (minimum, maximum, minlength, ...) are parsed
-	// but not yet attached — TODO: extend Schema with those fields.
 }
 
 // --- tiny helpers --------------------------------------------------------
@@ -392,12 +574,28 @@ func put(m map[string]any, k, v string) {
 	}
 }
 
-func orDefault(s, _ string) string {
-	if s == "" {
-		return "" // description is required by spec; emitter leaves "" so
-		// validation flags it rather than inventing text.
+func putFloat(m map[string]any, k string, v *float64) {
+	if v != nil {
+		m[k] = *v
 	}
-	return s
+}
+
+func putInt(m map[string]any, k string, v *int) {
+	if v != nil {
+		m[k] = *v
+	}
+}
+
+// responseDescription defaults a missing description to the HTTP status text
+// (matching swag) — the spec requires a description on every response.
+func responseDescription(r *Response) string {
+	if r.Description != "" {
+		return r.Description
+	}
+	if code, err := strconv.Atoi(r.Code); err == nil {
+		return http.StatusText(code)
+	}
+	return ""
 }
 
 func toAnySlice(ss []string) []any {
@@ -422,3 +620,15 @@ var standardMethods = map[string]bool{
 }
 
 func isStandardMethod(m string) bool { return standardMethods[m] }
+
+// sequentialMedia are the 3.2 sequential media types, where a response is a
+// stream of items and itemSchema describes each one.
+var sequentialMedia = map[string]bool{
+	"text/event-stream":        true,
+	"application/jsonl":        true,
+	"application/x-ndjson":     true,
+	"application/json-seq":     true,
+	"application/geo+json-seq": true,
+}
+
+func isSequentialMedia(mt string) bool { return sequentialMedia[mt] }

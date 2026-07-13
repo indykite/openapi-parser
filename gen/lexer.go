@@ -84,13 +84,17 @@ func fields(s string) []string {
 }
 
 // parseAttributes pulls swag-style trailing attributes like
-// `minimum(1) maxLength(10) enums(a,b,c) default(x)` out of a token list,
-// returning the leading non-attribute tokens and the attribute map.
+// `minimum(1) enums(a, b, c) default(x)` out of a token list, returning the
+// leading non-attribute tokens and the attribute map. Only identifier-named
+// tokens qualify — a quoted description that happens to end in a parenthesis
+// ("GID format (required)") is NOT an attribute. Values may contain spaces
+// (swag's own docs show `Enums(A, B, C)`), so unbalanced attribute tokens are
+// merged with their successors first.
 func parseAttributes(toks []string) (lead []string, attrs map[string]string) {
 	attrs = map[string]string{}
-	for _, t := range toks {
+	for _, t := range mergeAttrTokens(toks) {
 		open := strings.IndexByte(t, '(')
-		if open > 0 && strings.HasSuffix(t, ")") {
+		if open > 0 && strings.HasSuffix(t, ")") && isIdentToken(t[:open]) {
 			key := strings.ToLower(t[:open])
 			val := t[open+1 : len(t)-1]
 			attrs[key] = val
@@ -99,6 +103,49 @@ func parseAttributes(toks []string) (lead []string, attrs map[string]string) {
 		lead = append(lead, t)
 	}
 	return lead, attrs
+}
+
+// mergeAttrTokens rejoins attribute values that fields() split on spaces:
+// `Enums(active,` + `inactive)` becomes `Enums(active, inactive)`. A token
+// only starts a merge when it looks like an attribute opening (ident + "(")
+// without its closing parenthesis; if no close is found the original tokens
+// are kept.
+func mergeAttrTokens(toks []string) []string {
+	var out []string
+	for i := 0; i < len(toks); i++ {
+		t := toks[i]
+		open := strings.IndexByte(t, '(')
+		if open <= 0 || strings.HasSuffix(t, ")") || !isIdentToken(t[:open]) {
+			out = append(out, t)
+			continue
+		}
+		end := -1
+		for j := i + 1; j < len(toks); j++ {
+			if strings.HasSuffix(toks[j], ")") {
+				end = j
+				break
+			}
+		}
+		if end < 0 {
+			out = append(out, t) // never closed: not an attribute
+			continue
+		}
+		out = append(out, strings.Join(toks[i:end+1], " "))
+		i = end
+	}
+	return out
+}
+
+func isIdentToken(s string) bool {
+	for i := range len(s) {
+		c := s[i]
+		ok := c == '_' || c == '-' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(i > 0 && c >= '0' && c <= '9')
+		if !ok {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // isTruthy interprets swag's required flag.

@@ -1,4 +1,4 @@
-.PHONY: default fmt goimports gci lint lint-fix test tidy install-tools
+.PHONY: default fmt goimports gci lint lint-fix test tidy install-tools parity
 
 GO111MODULE=on
 
@@ -33,6 +33,14 @@ test:
 
 tidy:
 	go mod tidy
+
+# Compare oasgen output against swag-generated docs in another repository.
+# Services are auto-discovered by their docs/swagger.yaml; pass SERVICES to
+# restrict the list. Example: make parity REPO=../my-platform
+parity:
+	@test -n "$(REPO)" || { echo "usage: make parity REPO=path/to/repo [SERVICES=dir1,dir2]"; exit 2; }
+	@echo "==> Checking op/schema parity against swag output in $(REPO)..."
+	@go run ./cmd/oasparity -repo "$(REPO)" $(if $(SERVICES),-services "$(SERVICES)")
 
 install-tools:
 	@echo Installing tools

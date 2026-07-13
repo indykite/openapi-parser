@@ -27,7 +27,7 @@ import (
 //
 // Type resolution is now module-aware: structs are indexed by import path, and
 // each file's imports are recorded so a qualified reference like `model.Account`
-// can be resolved to the right package — including across packages in the same
+// can be resolved to the right package - including across packages in the same
 // module. (Cross-MODULE / third-party deps are a documented TODO; see resolve.)
 type source struct {
 	structsByPath map[string]map[string]*structDef
@@ -41,14 +41,17 @@ type source struct {
 type commentGroup struct {
 	text string
 	file string
+	fn   string // name of the func this group documents, "" if free-floating
 }
 
 type structDef struct {
+	alias      ast.Expr // underlying type for named non-struct types (type X []Y)
 	name       string
 	doc        string
 	pkgName    string
 	importPath string
 	file       string
+	typeParams []string // generic type parameter names, in order
 	fields     []*ast.Field
 }
 
@@ -67,12 +70,21 @@ func extract(parseDirs []string) (*source, error) {
 	src := newSource()
 	fset := token.NewFileSet()
 
-	// Normalize the set of dirs we harvest annotations from.
-	harvest := map[string]bool{}
+	// Normalize the set of dirs we harvest annotations from. Harvesting is
+	// recursive (like swag): a file anywhere under a requested dir counts.
+	var harvestRoots []string
 	for _, d := range parseDirs {
 		if abs, err := filepath.Abs(d); err == nil {
-			harvest[abs] = true
+			harvestRoots = append(harvestRoots, abs)
 		}
+	}
+	inHarvest := func(dir string) bool {
+		for _, root := range harvestRoots {
+			if dir == root || strings.HasPrefix(dir, root+string(filepath.Separator)) {
+				return true
+			}
+		}
+		return false
 	}
 
 	// Find the module root + path so we can index the whole module for types.
@@ -86,10 +98,19 @@ func extract(parseDirs []string) (*source, error) {
 		}
 		collectImports(path, f, src)
 		collectTypes(path, importPath, f.Name.Name, f, src)
-		// Harvest annotations only from the requested dirs.
-		if harvest[filepath.Dir(path)] {
+		// Harvest annotations only from under the requested dirs.
+		if inHarvest(filepath.Dir(path)) {
+			// map doc comments to the function they document, so operations
+			// can default their operationId to the handler name
+			owners := map[*ast.CommentGroup]string{}
+			for _, decl := range f.Decls {
+				if fd, ok := decl.(*ast.FuncDecl); ok && fd.Doc != nil {
+					owners[fd.Doc] = fd.Name.Name
+				}
+			}
 			for _, cg := range f.Comments {
-				src.commentGroups = append(src.commentGroups, commentGroup{text: cg.Text(), file: path})
+				src.commentGroups = append(src.commentGroups,
+					commentGroup{text: cg.Text(), file: path, fn: owners[cg]})
 			}
 		}
 	}
@@ -102,22 +123,10 @@ func extract(parseDirs []string) (*source, error) {
 		return src, nil
 	}
 
-	// No module root: index + harvest only the requested dirs (non-recursive).
+	// No module root: index + harvest the requested dirs recursively.
 	for _, dir := range parseDirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
+		if err := walkModule(dir, fset, indexFile); err != nil {
 			return nil, err
-		}
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
-				continue
-			}
-			path := filepath.Join(dir, e.Name())
-			f, perr := parser.ParseFile(fset, path, nil, parser.ParseComments)
-			if perr != nil {
-				return nil, perr
-			}
-			indexFile(path, f)
 		}
 	}
 	return src, nil
@@ -172,10 +181,6 @@ func collectTypes(path, importPath, pkgName string, f *ast.File, src *source) {
 			if !ok {
 				continue
 			}
-			st, ok := ts.Type.(*ast.StructType)
-			if !ok {
-				continue
-			}
 			doc := ""
 			if ts.Doc != nil {
 				doc = ts.Doc.Text()
@@ -185,21 +190,43 @@ func collectTypes(path, importPath, pkgName string, f *ast.File, src *source) {
 			def := &structDef{
 				name:       ts.Name.Name,
 				doc:        doc,
-				fields:     st.Fields.List,
 				pkgName:    pkgName,
 				importPath: importPath,
 				file:       path,
+				typeParams: typeParamNames(ts),
+			}
+			if st, ok := ts.Type.(*ast.StructType); ok {
+				def.fields = st.Fields.List
+			} else {
+				def.alias = ts.Type // named non-struct type, resolved inline
 			}
 			if src.structsByPath[importPath] == nil {
 				src.structsByPath[importPath] = map[string]*structDef{}
 			}
 			src.structsByPath[importPath][ts.Name.Name] = def
-			if _, exists := src.flat[ts.Name.Name]; !exists {
+			// last-resort fallback map: structs take precedence over named
+			// non-struct types, so an alias never shadows a same-named struct
+			if existing, exists := src.flat[ts.Name.Name]; !exists ||
+				(existing.alias != nil && def.alias == nil) {
 				src.flat[ts.Name.Name] = def
 			}
 		}
 		return true
 	})
+}
+
+// typeParamNames lists a type spec's generic parameter names, in order.
+func typeParamNames(ts *ast.TypeSpec) []string {
+	if ts.TypeParams == nil {
+		return nil
+	}
+	var names []string
+	for _, f := range ts.TypeParams.List {
+		for _, n := range f.Names {
+			names = append(names, n.Name)
+		}
+	}
+	return names
 }
 
 // --- module discovery ----------------------------------------------------
@@ -261,6 +288,7 @@ func firstOr(ss []string, def string) string {
 var generalMarkers = map[string]bool{
 	"title": true, "version": true, "host": true, "basepath": true,
 	"termsofservice": true, "schemes": true, "externaldocs.url": true,
+	"self": true,
 }
 
 func isGeneralGroup(ds []directive) bool {
@@ -276,7 +304,7 @@ func isGeneralGroup(ds []directive) bool {
 
 func isOperationGroup(ds []directive) bool {
 	for _, d := range ds {
-		if d.name == "router" {
+		if d.name == "router" || d.name == "webhook" {
 			return true
 		}
 	}
