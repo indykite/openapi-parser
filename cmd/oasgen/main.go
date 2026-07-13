@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/indykite/openapi-parser/gen"
@@ -30,6 +31,7 @@ func main() {
 		dirs    = flag.String("d", ".", "comma-separated directories to parse")
 		out     = flag.String("o", "openapi.json", "output file")
 		version = flag.String("oas", "3.2.0", "target OpenAPI version: 3.2.0 or 3.1.0")
+		format  = flag.String("format", "", "output format: json or yaml (default: from -o extension, else json)")
 	)
 	flag.Parse()
 
@@ -44,7 +46,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	data, err := api.EmitJSON(gen.EmitOptions{Version: *version})
+	f := strings.ToLower(*format)
+	if f == "" {
+		switch strings.ToLower(filepath.Ext(*out)) {
+		case ".yaml", ".yml":
+			f = "yaml"
+		default:
+			f = "json"
+		}
+	}
+
+	var data []byte
+	switch f {
+	case "json":
+		data, err = api.EmitJSON(gen.EmitOptions{Version: *version})
+	case "yaml":
+		data, err = api.EmitYAML(gen.EmitOptions{Version: *version})
+	default:
+		fmt.Fprintf(os.Stderr, "oasgen: unknown format %q (want json or yaml)\n", f)
+		os.Exit(1)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "oasgen: emit:", err)
 		os.Exit(1)

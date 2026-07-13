@@ -26,7 +26,9 @@ type API struct {
 	Schemas         map[string]*Schema
 	Extensions      map[string]any
 	Info            Info
+	Self            string // 3.2 $self: this document's URI
 	Servers         []Server
+	Schemes         []string // from @schemes; applied to host-derived servers
 	Tags            []Tag
 	Security        []map[string][]string
 	Operations      []Operation
@@ -35,6 +37,7 @@ type API struct {
 // Info is the OpenAPI info object (title, version, contact, license).
 type Info struct {
 	Title          string
+	Summary        string // 3.1+
 	Version        string
 	Description    string
 	TermsOfService string
@@ -45,13 +48,22 @@ type Info struct {
 // Contact is the API contact information.
 type Contact struct{ Name, URL, Email string }
 
-// License is the API license name and URL.
-type License struct{ Name, URL string }
+// License is the API license name, SPDX identifier (3.1+), and URL.
+type License struct{ Name, Identifier, URL string }
 
-// Server is a single server entry (its URL and description).
+// Server is a single server entry.
 type Server struct {
+	Variables   map[string]ServerVariable
 	URL         string
+	Name        string // 3.2
 	Description string
+}
+
+// ServerVariable is one URL-template variable of a server.
+type ServerVariable struct {
+	Default     string
+	Description string
+	Enum        []string
 }
 
 // Tag carries the native 3.2 hierarchical fields directly — no x- smuggling,
@@ -91,23 +103,26 @@ type OAuthFlow struct {
 	DeviceAuthorizationURL string
 }
 
-// Operation is one path+method.
+// Operation is one path+method — or one webhook+method when Webhook is set
+// (webhooks live under the top-level `webhooks` map, not `paths`).
 type Operation struct {
-	Extensions  map[string]any
-	Body        *Param
-	Path        string
-	Method      string
-	ID          string
-	Summary     string
-	Description string
-	Params      []Param
-	Produces    []string
-	Consumes    []string
-	Responses   []Response
-	Security    []map[string][]string
-	Tags        []string
-	Deprecated  bool
-	Streaming   bool
+	Extensions   map[string]any
+	Body         *Param
+	Form         []Param // formData params, emitted as one form request body
+	ExternalDocs *ExternalDocs
+	Path         string
+	Webhook      string // webhook name; mutually exclusive with Path
+	Method       string
+	ID           string
+	Summary      string
+	Description  string
+	Params       []Param
+	Produces     []string
+	Consumes     []string
+	Responses    []Response
+	Security     []map[string][]string
+	Tags         []string
+	Deprecated   bool
 }
 
 // Param is a request parameter or body (its location given by In).
@@ -126,6 +141,7 @@ type Response struct {
 	Schema      *Schema
 	Headers     map[string]Header
 	Code        string
+	Summary     string // 3.2
 	Description string
 	Kind        string
 	DataType    string
@@ -141,13 +157,26 @@ type Header struct {
 // Ref, when set, wins (emitted as $ref). Otherwise Type/Items/Properties.
 type Schema struct {
 	Example              any
+	Default              any
+	Extensions           map[string]any // x-... from extensions struct tags
 	Items                *Schema
 	Properties           map[string]*Schema
 	AdditionalProperties *Schema
+	Minimum              *float64
+	Maximum              *float64
+	ExclusiveMinimum     *float64
+	ExclusiveMaximum     *float64
+	MultipleOf           *float64
+	MinLength            *int
+	MaxLength            *int
+	MinItems             *int
+	MaxItems             *int
 	Ref                  string
 	Format               string
+	Pattern              string
 	Description          string
 	Type                 []string
 	Required             []string
 	Enum                 []any
+	AnyOf                []*Schema
 }
