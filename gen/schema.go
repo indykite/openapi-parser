@@ -112,7 +112,9 @@ func (r *resolver) mapSchema(tok string, ctx refCtx) *Schema {
 	}
 	val := strings.TrimSpace(after)
 	if val == "interface{}" || val == "any" || val == "" {
-		return &Schema{Type: []string{"object"}} // free-form object
+		// open map: the empty AdditionalProperties schema permits any value
+		// (emitted as additionalProperties: true)
+		return &Schema{Type: []string{"object"}, AdditionalProperties: &Schema{}}
 	}
 	return &Schema{Type: []string{"object"}, AdditionalProperties: r.schemaForToken(val, ctx)}
 }
@@ -467,7 +469,11 @@ func (r *resolver) instanceDisplay(def *structDef, args []string, ctx refCtx) st
 	return strings.Join(parts, "-")
 }
 
-// argDisplay renders one type argument for use inside a component key.
+// argDisplay renders one type argument for use inside a component key. The
+// package-separator dot is folded to '_' inside the argument segment
+// (Base-pkg_Type, swag's convention): component keys flow into the type names
+// SDK generators produce, so matching swag keeps those names stable across
+// the migration.
 func (r *resolver) argDisplay(tok string, ctx refCtx) string {
 	var prefix strings.Builder
 	for strings.HasPrefix(tok, "[]") {
@@ -475,14 +481,15 @@ func (r *resolver) argDisplay(tok string, ctx refCtx) string {
 		tok = tok[2:]
 	}
 	tok = strings.TrimPrefix(tok, "*")
+	name := sanitizeComponentKey(tok)
 	if b, nested, ok := splitGeneric(tok); ok {
 		if display, _ := r.instantiate(b, nested, ctx); display != "" {
-			return prefix.String() + display
+			name = display
 		}
 	} else if def := r.lookup(tok, ctx); def != nil {
-		return prefix.String() + displayName(def)
+		name = displayName(def)
 	}
-	return prefix.String() + sanitizeComponentKey(tok)
+	return prefix.String() + strings.ReplaceAll(name, ".", "_")
 }
 
 var componentKeyDisallowed = regexp.MustCompile(`[^A-Za-z0-9._-]`)

@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/indykite/openapi-parser/gen"
 )
 
 const sampleSwagger = `basePath: /configs/v1
@@ -63,9 +65,12 @@ func TestScanSwag(t *testing.T) {
 	if err := os.WriteFile(path, []byte(sampleSwagger), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	inv, err := scanSwag(path)
+	inv, err := scanBaseline(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if inv.oas3 {
+		t.Error("a swagger 2.0 document must not be flagged oas3")
 	}
 
 	wantOps := []string{"get /applications", "post /applications", "delete /applications/{id}"}
@@ -89,6 +94,79 @@ func TestScanSwag(t *testing.T) {
 		if !inv.defs[def] {
 			t.Errorf("missing def %q in %v", def, sortedKeys(inv.defs))
 		}
+	}
+}
+
+const sampleOpenAPI32 = `components:
+  schemas:
+    svc.Ping:
+      properties:
+        ok:
+          type: boolean
+      type: object
+    svc.listResponse-svc_Item:
+      type: object
+info:
+  title: T
+  version: "1"
+openapi: 3.2.0
+paths:
+  /ping:
+    additionalOperations:
+      PURGE:
+        responses:
+          "202":
+            description: accepted
+    get:
+      responses:
+        "200":
+          description: pong
+  "/ping/{id}":
+    delete:
+      responses:
+        "204":
+          description: gone
+  /search:
+    query:
+      responses:
+        "200":
+          description: hits
+webhooks:
+  ping.created:
+    post:
+      responses:
+        "204":
+          description: ok
+`
+
+func TestScanBaselineOAS3(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "swagger.yaml")
+	if err := os.WriteFile(path, []byte(sampleOpenAPI32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inv, err := scanBaseline(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inv.oas3 {
+		t.Error("a document with a top-level openapi version must be flagged oas3")
+	}
+	wantOps := []string{"get /ping", "purge /ping", "delete /ping/{id}", "query /search"}
+	if len(inv.ops) != len(wantOps) {
+		t.Errorf("want %d ops, got %v", len(wantOps), sortedKeys(inv.ops))
+	}
+	for _, op := range wantOps {
+		if !inv.ops[op] {
+			t.Errorf("missing op %q in %v", op, sortedKeys(inv.ops))
+		}
+	}
+	for _, def := range []string{"svc.Ping", "svc.listResponse-svc_Item"} {
+		if !inv.defs[def] {
+			t.Errorf("missing def %q in %v", def, sortedKeys(inv.defs))
+		}
+	}
+	if len(inv.hooks) != 1 || !inv.hooks["ping.created"] {
+		t.Errorf("want webhook ping.created, got %v", sortedKeys(inv.hooks))
 	}
 }
 
@@ -138,6 +216,16 @@ func Handler() {}
 // @Router /search [query]
 func Search() {}
 
+// @Summary purge — a custom verb, additionalOperations in a 3.2 baseline
+// @Success 202 "accepted"
+// @Router /ping [purge]
+func Purge() {}
+
+// @Summary delete — '{' makes a 3.2 baseline quote the path key
+// @Success 204 "gone"
+// @Router /ping/{id} [delete]
+func Remove() {}
+
 // @Webhook ping.created
 // @Summary webhook — also absent from swag output by definition
 // @Success 204 "ok"
@@ -155,6 +243,11 @@ paths:
       responses:
         "200":
           description: pong
+  /ping/{id}:
+    delete:
+      responses:
+        "204":
+          description: gone
 swagger: "2.0"
 `
 
@@ -173,6 +266,11 @@ paths:
       responses:
         "200":
           description: pong
+  /ping/{id}:
+    delete:
+      responses:
+        "204":
+          description: gone
 swagger: "2.0"
 `
 
@@ -233,6 +331,62 @@ func TestCheckServiceMismatch(t *testing.T) {
 	for _, want := range []string{"missing operation: post /ping", "missing schema: svc.Ghost"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error should mention %q, got:\n%s", want, msg)
+		}
+	}
+}
+
+// writeFixtureOAS3 builds a service from fixtureGo and returns oasgen's own
+// 3.2 output as the baseline text (not yet written to disk).
+func writeFixtureOAS3(t *testing.T) (repo, baseline string) {
+	t.Helper()
+	repo = t.TempDir()
+	svc := filepath.Join(repo, "svc")
+	if err := os.MkdirAll(filepath.Join(svc, "docs"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(svc, "handler.go"), []byte(fixtureGo), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api, err := gen.Parse([]string{svc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := api.EmitYAML(gen.EmitOptions{Version: "3.2.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repo, string(data)
+}
+
+func writeBaseline(t *testing.T, repo, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repo, "svc", "docs", "swagger.yaml"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCheckServiceOAS3SelfParity is the regression-gate use case: a service
+// checked against oasgen's own 3.2 output must pass, with the query op, the
+// custom verb, and the webhook compared instead of skipped.
+func TestCheckServiceOAS3SelfParity(t *testing.T) {
+	repo, baseline := writeFixtureOAS3(t)
+	writeBaseline(t, repo, baseline)
+	if err := checkService(repo, "svc", "docs/swagger.yaml", true); err != nil {
+		t.Fatalf("self-parity against own 3.2 output should pass: %v", err)
+	}
+}
+
+func TestCheckServiceOAS3WebhookMismatch(t *testing.T) {
+	repo, baseline := writeFixtureOAS3(t)
+	// rename the baseline's webhook: ours becomes extra, the baseline's missing
+	writeBaseline(t, repo, strings.Replace(baseline, "ping.created", "ping.deleted", 1))
+	err := checkService(repo, "svc", "docs/swagger.yaml", false)
+	if err == nil {
+		t.Fatal("webhook mismatch should fail")
+	}
+	for _, want := range []string{"missing webhook: ping.deleted", "extra webhook: ping.created"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got:\n%s", want, err)
 		}
 	}
 }

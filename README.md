@@ -145,12 +145,20 @@ Beyond swag's annotation set, the resolver understands:
 
 ## Parity gate (`cmd/oasparity`)
 
-`oasparity` is a swag-migration regression gate: it parses each service's
+`oasparity` is a spec-parity regression gate: it parses each service's
 annotations with this module and compares the operation and schema inventories
-against the checked-in swag output (`docs/swagger.yaml`), without needing swag
-or a YAML dependency. Missing/extra operations or missing schemas fail with
-exit 1; extra oasgen components are allowed (unreferenced components are
-valid — swag doesn't register embedded base types, we do).
+against the checked-in baseline (`docs/swagger.yaml`), without needing swag
+or a YAML dependency. The baseline may be swag's Swagger 2.0 output (the
+migration case) or a previously generated OpenAPI 3.x document (the regression
+case). Missing/extra operations or missing schemas fail with exit 1; extra
+oasgen components are allowed (unreferenced components are valid — swag
+doesn't register embedded base types, we do).
+
+Against a 2.0 baseline, constructs swag cannot express (webhooks, the `query`
+method, `additionalOperations` verbs) are excluded from the comparison; against
+a 3.x baseline they are compared too. 3.x baselines should be 3.2 output —
+3.1 downgrades those methods to `post`, which would diff against the
+annotations.
 
 ```sh
 # Services are auto-discovered by the presence of docs/swagger.yaml:

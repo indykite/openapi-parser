@@ -428,7 +428,9 @@ func emitSchema(s *Schema) map[string]any {
 	put(m, "pattern", s.Pattern)
 	put(m, "description", s.Description)
 	if s.Example != nil {
-		m["example"] = s.Example
+		// JSON Schema 2020-12 (the 3.1/3.2 schema dialect) only defines the
+		// plural `examples` keyword; singular `example` is ignored there.
+		m["examples"] = []any{s.Example}
 	}
 	if s.Default != nil {
 		m["default"] = s.Default
@@ -459,7 +461,11 @@ func emitSchema(s *Schema) map[string]any {
 		m["required"] = toAnySlice(s.Required)
 	}
 	if s.AdditionalProperties != nil {
-		m["additionalProperties"] = emitSchema(s.AdditionalProperties)
+		if ap := emitSchema(s.AdditionalProperties); len(ap) == 0 {
+			m["additionalProperties"] = true // empty schema ≡ true: any value
+		} else {
+			m["additionalProperties"] = ap
+		}
 	}
 	maps.Copy(m, s.Extensions)
 	return m
