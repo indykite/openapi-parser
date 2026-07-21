@@ -12,28 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command oasparity is a swag-migration regression gate: it parses each
+// Command oasparity is a spec-parity regression gate: it parses each
 // service's annotations with gen and compares the operation and schema
-// inventories against the checked-in swag output (docs/swagger.yaml).
+// inventories against the checked-in baseline (docs/swagger.yaml). The
+// baseline may be swag's Swagger 2.0 output (the migration case) or a
+// previously generated OpenAPI 3.x document (the regression case).
 //
 //	oasparity -repo path/to/repo                       # auto-discover services
 //	oasparity -repo path/to/repo -services svc/a,svc/b # explicit list
 //
-// Without -services, every directory under -repo containing the swag output
+// Without -services, every directory under -repo containing the baseline
 // (the -docs relative path) is checked. A service fails when an operation
-// differs in either direction, or when a swag definition has no oasgen
+// differs in either direction, or when a baseline schema has no oasgen
 // counterpart. Extra oasgen components are reported but allowed
 // (unreferenced components are valid). Exits 1 on any failure so it can
 // gate CI.
+//
+// Against a 2.0 baseline, constructs swag cannot express (webhooks, the
+// query method, additionalOperations verbs) are excluded from the
+// comparison. Against a 3.x baseline they are compared too — so 3.x
+// baselines should be 3.2 output (3.1 downgrades those methods to post,
+// which would diff against the parsed annotations).
 package main
 
 import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/indykite/openapi-parser/gen"
@@ -44,7 +54,7 @@ func main() {
 		repo     = flag.String("repo", ".", "root of the repository holding the services")
 		services = flag.String("services", "",
 			"comma-separated service dirs relative to -repo (default: auto-discover by -docs)")
-		docs    = flag.String("docs", "docs/swagger.yaml", "swag output path relative to each service dir")
+		docs    = flag.String("docs", "docs/swagger.yaml", "baseline spec path relative to each service dir")
 		verbose = flag.Bool("v", false, "list extra oasgen components too")
 	)
 	flag.Parse()
@@ -117,7 +127,7 @@ func discoverServices(repo, docs string) ([]string, error) {
 
 func checkService(repo, svc, docs string, verbose bool) error {
 	dir := filepath.Join(repo, svc)
-	swag, err := scanSwag(filepath.Join(dir, docs))
+	base, err := scanBaseline(filepath.Join(dir, docs))
 	if err != nil {
 		return err
 	}
@@ -129,27 +139,41 @@ func checkService(repo, svc, docs string, verbose bool) error {
 	var problems []string
 
 	ourOps := map[string]bool{}
+	ourHooks := map[string]bool{}
 	for i := range api.Operations {
 		op := &api.Operations[i]
 		if op.Webhook != "" {
-			continue // swag 2.0 has no webhooks to compare against
-		}
-		if !httpMethods[op.Method] {
-			// 3.2-only methods (query, custom verbs) cannot appear in swag
-			// output either; remapping them (e.g. to post) could collide
-			// with a real operation on the same path, so skip like webhooks
+			ourHooks[op.Webhook] = true
 			continue
 		}
-		ourOps[op.Method+" "+op.Path] = true
+		if !base.oas3 && !httpMethods[op.Method] {
+			// 3.2-only methods (query, custom verbs) cannot appear in swag
+			// 2.0 output; remapping them (e.g. to post) could collide with
+			// a real operation on the same path, so skip like webhooks
+			continue
+		}
+		ourOps[strings.ToLower(op.Method)+" "+op.Path] = true
 	}
-	for _, op := range sortedKeys(swag.ops) {
+	for _, op := range sortedKeys(base.ops) {
 		if !ourOps[op] {
 			problems = append(problems, "  missing operation: "+op)
 		}
 	}
 	for _, op := range sortedKeys(ourOps) {
-		if !swag.ops[op] {
+		if !base.ops[op] {
 			problems = append(problems, "  extra operation: "+op)
+		}
+	}
+	if base.oas3 { // 2.0 baselines cannot express webhooks; 3.x ones can
+		for _, h := range sortedKeys(base.hooks) {
+			if !ourHooks[h] {
+				problems = append(problems, "  missing webhook: "+h)
+			}
+		}
+		for _, h := range sortedKeys(ourHooks) {
+			if !base.hooks[h] {
+				problems = append(problems, "  extra webhook: "+h)
+			}
 		}
 	}
 
@@ -160,7 +184,7 @@ func checkService(repo, svc, docs string, verbose bool) error {
 		ourSchemas[normalizeName(name)] = true
 	}
 	covered := 0
-	for _, def := range sortedKeys(swag.defs) {
+	for _, def := range sortedKeys(base.defs) {
 		if ourSchemas[normalizeName(def)] {
 			covered++
 		} else {
@@ -172,15 +196,15 @@ func checkService(repo, svc, docs string, verbose bool) error {
 		return fmt.Errorf("%s", strings.Join(problems, "\n"))
 	}
 	extra := len(ourSchemas) - covered
-	_, _ = fmt.Fprintf(os.Stdout, "%s: OK — %d ops, %d/%d swag schemas covered (+%d extra components)\n",
-		svc, len(ourOps), covered, len(swag.defs), extra)
+	_, _ = fmt.Fprintf(os.Stdout, "%s: OK — %d ops, %d/%d baseline schemas covered (+%d extra components)\n",
+		svc, len(ourOps), covered, len(base.defs), extra)
 	if verbose && extra > 0 {
-		swagNorm := map[string]bool{}
-		for def := range swag.defs {
-			swagNorm[normalizeName(def)] = true
+		baseNorm := map[string]bool{}
+		for def := range base.defs {
+			baseNorm[normalizeName(def)] = true
 		}
 		for _, name := range sortedKeys(ourSchemas) {
-			if !swagNorm[name] {
+			if !baseNorm[name] {
 				_, _ = fmt.Fprintf(os.Stdout, "    extra: %s\n", name)
 			}
 		}
@@ -206,13 +230,16 @@ func sortedKeys(m map[string]bool) []string {
 	return keys
 }
 
-// --- swag swagger.yaml inventory scanner -----------------------------------
+// --- baseline spec inventory scanner ----------------------------------------
 
-// swagInventory is what we extract from a swag-generated swagger.yaml:
-// "method path" operation keys and definition names.
-type swagInventory struct {
-	ops  map[string]bool
-	defs map[string]bool
+// baselineInventory is what we extract from a baseline spec: "method path"
+// operation keys, schema names (2.0 definitions or 3.x components.schemas),
+// webhook names, and which flavor the document is.
+type baselineInventory struct {
+	ops   map[string]bool
+	defs  map[string]bool
+	hooks map[string]bool
+	oas3  bool
 }
 
 var httpMethods = map[string]bool{
@@ -220,38 +247,94 @@ var httpMethods = map[string]bool{
 	"options": true, "head": true, "patch": true, "trace": true,
 }
 
-// scanSwag reads the inventory with an indentation scanner instead of a YAML
-// parser (keeping the module dependency-free). swag's generated output is
-// strictly 2-space-indented with unquoted keys: top-level sections at column
-// 0, path/definition keys at 2 spaces, methods at 4. Wrapped scalar content
-// is always deeper, so matching exact depths is unambiguous.
-func scanSwag(path string) (*swagInventory, error) {
+// scanMethods are the method keys recognized under a path entry: the standard
+// verbs plus 3.2's first-class query (never present in 2.0 output, so it is
+// safe to accept unconditionally).
+var scanMethods = func() map[string]bool {
+	m := maps.Clone(httpMethods)
+	m["query"] = true
+	return m
+}()
+
+// scanBaseline reads the inventory with an indentation scanner instead of a
+// YAML parser (keeping the module dependency-free). Both generators emit
+// strictly 2-space-indented block YAML: top-level sections at column 0,
+// path/definition keys at 2 spaces, methods at 4. In the 3.x flavor schema
+// names sit under components.schemas at 4, custom verbs under a path's
+// additionalOperations at 6, webhook names under webhooks at 2, and keys may
+// be JSON-quoted (oasgen quotes any string with YAML indicator characters,
+// e.g. paths containing '{'). Wrapped scalar content is always deeper than
+// the matched depths, so exact-depth matching stays unambiguous.
+func scanBaseline(path string) (*baselineInventory, error) {
 	//nolint:gosec // path comes from the operator's own -repo/-services flags
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	inv := &swagInventory{ops: map[string]bool{}, defs: map[string]bool{}}
-	section, currentPath := "", ""
+	sc := &baselineScanner{inv: &baselineInventory{
+		ops: map[string]bool{}, defs: map[string]bool{}, hooks: map[string]bool{},
+	}}
 	for line := range strings.SplitSeq(string(data), "\n") {
-		trimmed := strings.TrimRight(line, "\r ")
-		if trimmed == "" {
-			continue
-		}
-		indent := len(trimmed) - len(strings.TrimLeft(trimmed, " "))
-		key, isKey := strings.CutSuffix(strings.TrimSpace(trimmed), ":")
-		switch {
-		case indent == 0:
-			if isKey {
-				section = key
-			}
-		case section == "definitions" && indent == 2 && isKey:
-			inv.defs[key] = true
-		case section == "paths" && indent == 2 && isKey && strings.HasPrefix(key, "/"):
-			currentPath = key
-		case section == "paths" && indent == 4 && isKey && httpMethods[key] && currentPath != "":
-			inv.ops[key+" "+currentPath] = true
+		sc.scanLine(line)
+	}
+	return sc.inv, nil
+}
+
+// baselineScanner carries the position state threaded through scanLine calls.
+type baselineScanner struct {
+	inv          *baselineInventory
+	section      string
+	subsection   string
+	currentPath  string
+	inAdditional bool
+}
+
+func (sc *baselineScanner) scanLine(line string) {
+	trimmed := strings.TrimRight(line, "\r ")
+	if trimmed == "" {
+		return
+	}
+	indent := len(trimmed) - len(strings.TrimLeft(trimmed, " "))
+	key, isKey := strings.CutSuffix(strings.TrimSpace(trimmed), ":")
+	if isKey && strings.HasPrefix(key, `"`) {
+		if unquoted, err := strconv.Unquote(key); err == nil {
+			key = unquoted
 		}
 	}
-	return inv, nil
+	switch {
+	case indent == 0:
+		sc.section, sc.subsection = "", ""
+		if isKey {
+			sc.section = key
+		} else if name, _, _ := strings.Cut(strings.TrimSpace(trimmed), ":"); name == "openapi" {
+			sc.inv.oas3 = true
+		}
+	case !isKey:
+	case sc.section == "paths":
+		sc.pathsLine(indent, key)
+	case sc.section == "definitions" && indent == 2:
+		sc.inv.defs[key] = true
+	case sc.section == "components" && indent == 2:
+		sc.subsection = key
+	case sc.section == "components" && sc.subsection == "schemas" && indent == 4:
+		sc.inv.defs[key] = true
+	case sc.section == "webhooks" && indent == 2:
+		sc.inv.hooks[key] = true
+	}
+}
+
+func (sc *baselineScanner) pathsLine(indent int, key string) {
+	switch {
+	case indent == 2 && strings.HasPrefix(key, "/"):
+		sc.currentPath = key
+		sc.inAdditional = false
+	case indent == 4 && sc.currentPath != "":
+		sc.inAdditional = key == "additionalOperations"
+		if scanMethods[key] {
+			sc.inv.ops[key+" "+sc.currentPath] = true
+		}
+	case indent == 6 && sc.inAdditional && sc.currentPath != "":
+		// custom verbs (emitted uppercase, e.g. PURGE)
+		sc.inv.ops[strings.ToLower(key)+" "+sc.currentPath] = true
+	}
 }

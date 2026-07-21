@@ -184,7 +184,8 @@ func TestGenericInstantiation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const instance = "testdata.listResponse-testdata.AccountResponse"
+	// the type argument folds its package dot to '_' (swag's convention)
+	const instance = "testdata.listResponse-testdata_AccountResponse"
 	inst, ok := api.Schemas[instance]
 	if !ok {
 		t.Fatalf("generic instantiation not registered; have: %v", schemaKeys(api.Schemas))
@@ -821,12 +822,39 @@ func TestMapAndSwaggertypeFields(t *testing.T) {
 		t.Errorf("map[string]string should be object+additionalProperties string: %+v", meta)
 	}
 	attrs := acct.Properties["attrs"]
-	if !slices.Contains(attrs.Type, "object") || attrs.AdditionalProperties != nil {
-		t.Errorf("map[string]any should be a free-form object: %+v", attrs)
+	if !slices.Contains(attrs.Type, "object") || attrs.AdditionalProperties == nil ||
+		attrs.AdditionalProperties.Type != nil {
+		t.Errorf("map[string]any should be an open map (empty additionalProperties schema): %+v", attrs)
 	}
 	raw := acct.Properties["raw"]
 	if !slices.Contains(raw.Type, "string") || raw.Format != "base64" {
 		t.Errorf("swaggertype override should win over []byte: %+v", raw)
+	}
+}
+
+func TestEmitExamplesArrayAndOpenMap(t *testing.T) {
+	api, err := gen.Parse([]string{"../testdata"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := api.Emit(gen.EmitOptions{Version: "3.2.0"})
+	schemas := doc["components"].(map[string]any)["schemas"].(map[string]any)
+	props := schemas["testdata.Account"].(map[string]any)["properties"].(map[string]any)
+
+	// JSON Schema 2020-12 (the 3.1/3.2 dialect) only defines the plural
+	// `examples` keyword; singular `example` is invisible to compliant tools.
+	id := props["id"].(map[string]any)
+	if _, ok := id["example"]; ok {
+		t.Errorf("singular example must not appear on schema objects: %v", id)
+	}
+	if ex, ok := id["examples"].([]any); !ok || len(ex) != 1 || ex[0] != int64(1) {
+		t.Errorf("example should emit as the one-element examples array, got %v", id["examples"])
+	}
+
+	// map[string]any keeps its open-map semantics on the wire.
+	attrs := props["attrs"].(map[string]any)
+	if ap, ok := attrs["additionalProperties"].(bool); !ok || !ap {
+		t.Errorf("free-form map should emit additionalProperties: true, got %v", attrs)
 	}
 }
 
