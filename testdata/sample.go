@@ -70,7 +70,11 @@ type Account struct {
 	// Code is required even though json omits it when empty (swag semantics).
 	Code string `json:"code,omitempty" validate:"required"`
 	// Hosts: validator dive scopes min=8 to each element, not the array.
-	Hosts  []string `json:"hosts" binding:"min=1,dive,min=8"`
+	Hosts []string `json:"hosts" binding:"min=1,dive,min=8"`
+	// Contact is a required pointer: validation rejects null, so no null type.
+	Contact *string `json:"contact" validate:"required"`
+	// Parent account, required: the null branch is dropped, this doc survives.
+	Parent *Account `json:"parent" validate:"required"`
 	hidden string   // unexported: never marshaled, must not appear
 }
 

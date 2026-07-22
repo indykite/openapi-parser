@@ -31,6 +31,9 @@ import (
 // so the output is always valid YAML.
 func (api *API) EmitYAML(opt EmitOptions) ([]byte, error) {
 	var b strings.Builder
+	// Document start marker, so the output survives yamlfmt-style formatters
+	// (include_document_start) without churn on regeneration.
+	b.WriteString("---\n")
 	writeYAMLMap(&b, api.Emit(opt), 0, false)
 	return []byte(b.String()), nil
 }
@@ -52,7 +55,7 @@ func writeYAMLValue(b *strings.Builder, v any, indent int) {
 			return
 		}
 		b.WriteByte('\n')
-		writeYAMLSeq(b, t, indent)
+		writeYAMLSeq(b, t, indent, false)
 	default:
 		b.WriteByte(' ')
 		b.WriteString(yamlScalar(t))
@@ -73,14 +76,24 @@ func writeYAMLMap(b *strings.Builder, m map[string]any, indent int, inline bool)
 	}
 }
 
-func writeYAMLSeq(b *strings.Builder, s []any, indent int) {
-	for _, v := range s {
-		b.WriteString(strings.Repeat("  ", indent))
+// writeYAMLSeq writes a sequence's items at the given indent. When inline is
+// true the first item continues the current line (after an outer dash).
+func writeYAMLSeq(b *strings.Builder, s []any, indent int, inline bool) {
+	for i, v := range s {
+		if !inline || i > 0 {
+			b.WriteString(strings.Repeat("  ", indent))
+		}
 		b.WriteByte('-')
 		if m, ok := v.(map[string]any); ok && len(m) > 0 {
 			// compact form: first key shares the dash's line
 			b.WriteByte(' ')
 			writeYAMLMap(b, m, indent+1, true)
+			continue
+		}
+		if l, ok := v.([]any); ok && len(l) > 0 {
+			// compact form: nested sequence's first dash shares this line
+			b.WriteByte(' ')
+			writeYAMLSeq(b, l, indent+1, true)
 			continue
 		}
 		writeYAMLValue(b, v, indent+1)

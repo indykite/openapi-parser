@@ -17,6 +17,7 @@ package gen
 import (
 	"go/ast"
 	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -53,7 +54,9 @@ func (r *resolver) schemaForToken(tok string, ctx refCtx) *Schema {
 	case tok == "interface{}" || tok == "any":
 		return &Schema{} // empty schema matches anything
 	case strings.HasPrefix(tok, "[]"):
-		return &Schema{Type: []string{"array"}, Items: r.schemaForToken(tok[2:], ctx)}
+		// Pointer elements ([]*T) are a Go implementation detail; a JSON null
+		// element is never valid input, so items are emitted non-nullable.
+		return &Schema{Type: []string{"array"}, Items: r.schemaForToken(strings.TrimLeft(tok[2:], "*"), ctx)}
 	case strings.HasPrefix(tok, "*"):
 		return makeNullable(r.schemaForToken(tok[1:], ctx))
 	case strings.HasPrefix(tok, "map["):
@@ -323,6 +326,9 @@ func (r *resolver) addField(schema *Schema, field *ast.Field, ctx refCtx, subst 
 	// can be mandatory while the response marshaler omits empty values
 	if hasTag(tag, "validate", "required") || hasTag(tag, "binding", "required") {
 		schema.Required = append(schema.Required, name)
+		// A required pointer field rejects JSON null at validation time,
+		// so drop the null branch the pointer type added.
+		schema.Properties[name] = stripNullable(fieldSchema)
 	}
 }
 
@@ -622,6 +628,32 @@ func exprToToken(e ast.Expr) string {
 	default:
 		return "object"
 	}
+}
+
+// stripNullable undoes makeNullable for schemas where JSON null is not
+// actually accepted (e.g. required pointer fields).
+func stripNullable(s *Schema) *Schema {
+	if s == nil {
+		return nil
+	}
+	if len(s.AnyOf) == 2 && isPureNull(s.AnyOf[1]) {
+		if reflect.DeepEqual(s, &Schema{AnyOf: s.AnyOf}) {
+			return s.AnyOf[0] // bare wrapper: collapse to the inner schema
+		}
+		// Field metadata (description, example, ...) lives on the wrapper;
+		// keep it and drop only the null branch.
+		s.AnyOf = s.AnyOf[:1]
+		return s
+	}
+	s.Type = slices.DeleteFunc(s.Type, func(t string) bool { return t == "null" })
+	return s
+}
+
+// isPureNull reports whether s is exactly the `{type: "null"}` schema that
+// makeNullable produces.
+func isPureNull(s *Schema) bool {
+	return s != nil && len(s.Type) == 1 && s.Type[0] == "null" &&
+		s.Ref == "" && len(s.Properties) == 0 && len(s.AnyOf) == 0
 }
 
 func makeNullable(s *Schema) *Schema {
