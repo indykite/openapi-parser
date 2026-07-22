@@ -225,20 +225,18 @@ func TestEmbeddedStructPromotion(t *testing.T) {
 	}
 
 	// Named non-struct type (type Labels []*Account) resolves inline; the
-	// pointer element makes items nullable via anyOf ($ref allows no siblings).
+	// pointer element is a Go implementation detail, so items stay a plain
+	// non-nullable $ref (a JSON null element is never valid input).
 	labels := acct.Properties["labels"]
 	if labels == nil || !slices.Contains(labels.Type, "array") {
 		t.Fatalf("labels should inline the named slice type as array, got %+v", labels)
 	}
 	items := labels.Items
-	if items == nil || len(items.AnyOf) != 2 {
-		t.Fatalf("pointer items should be anyOf[$ref, null], got %+v", items)
+	if items == nil || len(items.AnyOf) != 0 {
+		t.Fatalf("pointer items should be a plain non-nullable ref, got %+v", items)
 	}
-	if items.AnyOf[0].Ref != "#/components/schemas/testdata.Account" {
-		t.Errorf("anyOf[0] should ref Account, got %+v", items.AnyOf[0])
-	}
-	if !slices.Contains(items.AnyOf[1].Type, "null") {
-		t.Errorf("anyOf[1] should be null, got %+v", items.AnyOf[1])
+	if items.Ref != "#/components/schemas/testdata.Account" {
+		t.Errorf("items should ref Account, got %+v", items)
 	}
 }
 
@@ -331,6 +329,35 @@ func TestEscapedTagsUnexportedDiveRequired(t *testing.T) {
 	// unexported fields are never marshaled.
 	if _, ok := acct.Properties["hidden"]; ok {
 		t.Error("unexported field must not appear in the schema")
+	}
+}
+
+func TestRequiredPointerNotNullable(t *testing.T) {
+	api, err := gen.Parse([]string{"../testdata"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := api.Schemas["testdata.Account"]
+	for _, want := range []string{"contact", "parent"} {
+		if !slices.Contains(acct.Required, want) {
+			t.Errorf("%s should be required, got %v", want, acct.Required)
+		}
+	}
+
+	// A required *string rejects null at validation time: plain string type.
+	contact := acct.Properties["contact"]
+	if !slices.Contains(contact.Type, "string") || slices.Contains(contact.Type, "null") {
+		t.Errorf("required *string must not be nullable: %+v", contact)
+	}
+
+	// A required pointer-to-struct drops the anyOf null branch but keeps the
+	// field metadata applied to the wrapper (here, the doc comment).
+	parent := acct.Properties["parent"]
+	if len(parent.AnyOf) != 1 || parent.AnyOf[0].Ref != "#/components/schemas/testdata.Account" {
+		t.Errorf("required pointer ref should keep only the ref branch: %+v", parent)
+	}
+	if !strings.Contains(parent.Description, "doc survives") {
+		t.Errorf("wrapper description lost: %+v", parent)
 	}
 }
 

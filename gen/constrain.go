@@ -24,8 +24,10 @@ import (
 )
 
 // coerceScalar converts a raw annotation/tag string to the schema's scalar
-// type, so `example:"5"` on an int field emits 5, not "5". Unparseable
-// values stay strings.
+// type, so `example:"5"` on an int field emits 5, not "5". On array schemas
+// the value is comma-separated per swag semantics (`example:"a,b"` on a
+// []string field emits ["a", "b"]), each item coerced to the item type.
+// Unparseable values stay strings.
 func coerceScalar(v string, s *Schema) any {
 	switch primaryType(s) {
 	case "integer":
@@ -40,6 +42,17 @@ func coerceScalar(v string, s *Schema) any {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
 		}
+	case "array":
+		item := s.Items
+		if item == nil {
+			item = &Schema{}
+		}
+		parts := strings.Split(v, ",")
+		arr := make([]any, 0, len(parts))
+		for _, p := range parts {
+			arr = append(arr, coerceScalar(strings.TrimSpace(p), item))
+		}
+		return arr
 	}
 	return v
 }

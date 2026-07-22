@@ -93,6 +93,27 @@ func TestCoerceScalarTable(t *testing.T) {
 	}
 }
 
+func TestCoerceScalarArrayTable(t *testing.T) {
+	strArr := &Schema{Type: []string{"array"}, Items: &Schema{Type: []string{"string"}}}
+	intArr := &Schema{Type: []string{"array"}, Items: &Schema{Type: []string{"integer"}}}
+	cases := []struct {
+		schema *Schema
+		want   any
+		in     string
+	}{
+		{strArr, []any{"a", "b"}, "a,b"},
+		{strArr, []any{"a"}, "a"},                                  // single item, no comma
+		{intArr, []any{int64(1), int64(2)}, "1, 2"},                // items trimmed and coerced
+		{intArr, []any{int64(1), "2x"}, "1,2x"},                    // unparseable item stays string
+		{&Schema{Type: []string{"array"}}, []any{"a", "b"}, "a,b"}, // nil Items: items stay strings
+	}
+	for _, c := range cases {
+		if got := coerceScalar(c.in, c.schema); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("coerceScalar(%q, %v) = %#v, want %#v", c.in, c.schema, got, c.want)
+		}
+	}
+}
+
 func TestApplyValidationRulesTable(t *testing.T) {
 	str := &Schema{Type: []string{"string"}}
 	applyValidationRules(str, "min=3,max=10,len=4")
@@ -301,6 +322,35 @@ func TestMakeNullableTable(t *testing.T) {
 	}
 	if again := makeNullable(prim); len(again.Type) != 2 { // idempotent
 		t.Errorf("idempotency: %+v", again)
+	}
+}
+
+func TestStripNullableTable(t *testing.T) {
+	if stripNullable(nil) != nil {
+		t.Error("nil should stay nil")
+	}
+	prim := stripNullable(&Schema{Type: []string{"string", "null"}})
+	if !reflect.DeepEqual(prim.Type, []string{"string"}) {
+		t.Errorf("primitive: %+v", prim)
+	}
+	bare := stripNullable(makeNullable(&Schema{Ref: "#/components/schemas/X"}))
+	if bare.Ref != "#/components/schemas/X" || len(bare.AnyOf) != 0 {
+		t.Errorf("bare wrapper should collapse to the inner ref: %+v", bare)
+	}
+	rich := makeNullable(&Schema{Ref: "#/components/schemas/X"})
+	rich.Description = "doc"
+	got := stripNullable(rich)
+	if got.Description != "doc" || len(got.AnyOf) != 1 || got.AnyOf[0].Ref == "" {
+		t.Errorf("wrapper metadata should survive minus the null branch: %+v", got)
+	}
+}
+
+func TestArrayItemsMultiPointerNotNullable(t *testing.T) {
+	for _, tok := range []string{"[]*int", "[]**int", "[]***int"} {
+		s := (&resolver{}).schemaForToken(tok, refCtx{})
+		if s.Items == nil || !reflect.DeepEqual(s.Items.Type, []string{"integer"}) {
+			t.Errorf("%s items should be plain integer: %+v", tok, s.Items)
+		}
 	}
 }
 
