@@ -207,7 +207,9 @@ func (p *generalParser) applySecurity(d directive) bool {
 	case d.name == "security":
 		// document-level security requirement — not a scheme attribute, so
 		// it ends the scheme section like any other non-scheme directive
-		p.api.Security = append(p.api.Security, parseSecurityReq(d.args))
+		if req := parseSecurityReq(d.args); len(req) > 0 {
+			p.api.Security = append(p.api.Security, req)
+		}
 		p.lastScheme = nil
 	case p.lastScheme == nil:
 		return false
@@ -295,7 +297,9 @@ func parseOperation(ds []directive, res *resolver, ctx refCtx) Operation {
 		case "success", "failure", "response":
 			op.Responses = append(op.Responses, parseResponses(d.args, res, ctx)...)
 		case "security":
-			op.Security = append(op.Security, parseSecurityReq(d.args))
+			if req := parseSecurityReq(d.args); len(req) > 0 {
+				op.Security = append(op.Security, req)
+			}
 		case "header":
 			attachHeader(&op, d.args)
 		case "externaldocs.url":
@@ -401,19 +405,34 @@ func splitMimeList(args string) []string {
 
 func parseSecurityReq(args string) map[string][]string {
 	req := map[string][]string{}
-	// "OAuth2Application[write, admin]" or "ApiKeyAuth"
-	name := args
-	var scopes []string
-	if open := strings.IndexByte(args, '['); open >= 0 {
-		name = strings.TrimSpace(args[:open])
-		inner := strings.Trim(args[open:], "[] ")
-		for s := range strings.SplitSeq(inner, ",") {
-			if s = strings.TrimSpace(s); s != "" {
-				scopes = append(scopes, s)
+	// One or more schemes combined with && (all required together, swag syntax):
+	// "OAuth2Application[write, admin]", "ApiKeyAuth" or "ApiKeyAuth && BearerAuth".
+	for part := range strings.SplitSeq(args, "&&") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name := part
+		var scopes []string
+		if open := strings.IndexByte(part, '['); open >= 0 {
+			name = strings.TrimSpace(part[:open])
+			inner := strings.Trim(part[open:], "[] ")
+			for s := range strings.SplitSeq(inner, ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					scopes = append(scopes, s)
+				}
 			}
 		}
+		if name == "" {
+			continue // malformed scope-only part like "[write]" - no scheme to require
+		}
+		req[name] = scopes
 	}
-	req[name] = scopes
+	if len(req) == 0 {
+		// An empty Security Requirement Object ({}) would mean "no auth
+		// required" - never emit one for a malformed annotation.
+		return nil
+	}
 	return req
 }
 
