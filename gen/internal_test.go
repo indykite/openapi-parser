@@ -114,6 +114,29 @@ func TestCoerceScalarArrayTable(t *testing.T) {
 	}
 }
 
+func TestParseSecurityReqTable(t *testing.T) {
+	cases := []struct {
+		want map[string][]string
+		in   string
+	}{
+		{map[string][]string{"ApiKeyAuth": nil}, "ApiKeyAuth"},
+		{map[string][]string{"OAuth2Application": {"write", "admin"}}, "OAuth2Application[write, admin]"},
+		// && combines schemes into a single requirement (all required together)
+		{map[string][]string{"ApiKeyAuth": nil, "BearerAuth": nil}, "ApiKeyAuth && BearerAuth"},
+		{map[string][]string{"OAuth2Application": {"write"}, "ApiKeyAuth": nil}, "OAuth2Application[write] && ApiKeyAuth"},
+		{map[string][]string{"A": nil, "B": nil}, "  A  &&  B  "}, // whitespace tolerated
+		{map[string][]string{"A": nil}, "A && "},                  // empty part skipped
+		{nil, "[write]"},                                          // malformed: missing scheme name
+		{nil, ""},                                                 // no schemes: nil, never {} ("no auth")
+		{nil, " && "},                                             // separators only: nil as well
+	}
+	for _, c := range cases {
+		if got := parseSecurityReq(c.in); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("parseSecurityReq(%q) = %#v, want %#v", c.in, got, c.want)
+		}
+	}
+}
+
 func TestApplyValidationRulesTable(t *testing.T) {
 	str := &Schema{Type: []string{"string"}}
 	applyValidationRules(str, "min=3,max=10,len=4")
@@ -158,6 +181,33 @@ func TestApplyValidationRulesTable(t *testing.T) {
 	ignored := &Schema{Type: []string{"string"}}
 	applyValidationRules(ignored, "required,gid=PROJECT,node_type,omitempty")
 	applyValidationRules(nil, "min=1")
+}
+
+func TestMalformedSecurityEmitsNoRequirement(t *testing.T) {
+	// A nil/empty parse result must not be appended: a {} requirement would
+	// mean "no auth required". Guards live in applySecurity and parseOperation.
+	api := &API{SecuritySchemes: map[string]SecurityScheme{}, Extensions: map[string]any{}}
+	parseGeneral(parseCommentGroup(`@title T
+@securitydefinitions.apikey K
+@in header
+@name Authorization
+@security [write]
+@security K`), api)
+	if len(api.Security) != 1 {
+		t.Fatalf("document security must keep only the valid requirement: %#v", api.Security)
+	}
+	if _, ok := api.Security[0]["K"]; !ok || len(api.Security[0]) != 1 {
+		t.Fatalf("document security requirement must reference exactly scheme K: %#v", api.Security[0])
+	}
+
+	res := &resolver{src: &source{}, schemas: map[string]*Schema{}}
+	op := parseOperation(parseCommentGroup(`@Router /x [get]
+@Summary X
+@Security [write]
+@Security K`), res, refCtx{})
+	if len(op.Security) != 1 {
+		t.Fatalf("operation security must keep only the valid requirement: %#v", op.Security)
+	}
 }
 
 func TestSchemeContextEndsAtNonSecurityDirective(t *testing.T) {
