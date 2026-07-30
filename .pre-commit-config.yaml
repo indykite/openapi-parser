@@ -15,7 +15,7 @@
 #
 # Usage & installation, the first configures the default stages only, the others must be installed explicitly:
 #   pre-commit install
-#   pre-commit install -t post-checkout -t commit-msg
+#   pre-commit install -t commit-msg
 #
 # Prerequisites:
 #   - if using 'make install-tools', then '~/go/bin' must be added to $PATH in ~/.bash_profile
@@ -42,24 +42,42 @@ repos:
       - id: check-useless-excludes
         name: pre-commit/check-useless-excludes
 
-  - repo: ssh://git@github.com/indykite/ops-common
-    rev: "3c7e44dc548e6f490a58b5d55393580c896598d7" # using a branch name (or HEAD) is not supported
+  # Hooks copied from indykite/ops-common (private repo), inlined to avoid the SSH dependency
+  - repo: local
     hooks:
-      # POST-CHECKOUT
-      # install explicitly with: pre-commit install -t post-checkout
-      - id: git-pull
-      - id: git-branch-delete-stale
-
       # pre-commit validations
       - id: pre-commit-validate-config
-      - id: pre-commit-validate-manifest
+        name: pre-commit/validate-config
+        files: ^\.pre-commit-config\.yaml$
+        entry: pre-commit validate-config
+        language: system
+        always_run: false
+        pass_filenames: false
 
       # SAST
       - id: trivy
+        name: trivy
+        entry: trivy filesystem --disable-telemetry --skip-version-check --exit-code=1 --config .trivy.yaml .
+        language: system
+        pass_filenames: false
 
       # Shellcheck
       - id: shfmt
+        name: shfmt
+        types: [shell]
+        exclude_types: [csh, tcsh, zsh]
+        entry: shfmt
+        args: [--list, --write, --diff, --indent, "4"]
+        language: system
+        always_run: false
+        pass_filenames: true
       - id: shellcheck
+        name: shellcheck
+        files: .*\.sh$
+        entry: shellcheck -S style -o all
+        language: system
+        always_run: false
+        pass_filenames: true
 
   #
   # Renovate
