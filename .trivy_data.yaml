@@ -2,4 +2,4 @@
 ksv0125:
   trusted_registries:
     - "docker.io"
-    - "europe-west1-docker.pkg.dev" # /indykite-mgmt/indykite/
+    - "europe-west1-docker.pkg.dev"
