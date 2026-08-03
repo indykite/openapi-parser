@@ -35,8 +35,9 @@ tidy:
 	go mod tidy
 
 # Compare oasgen output against swag-generated docs in another repository.
-# Services are auto-discovered by their docs/swagger.yaml; pass SERVICES to
-# restrict the list. Example: make parity REPO=../my-platform
+# A "service" is any directory with its own docs/swagger.yaml baseline; they
+# are auto-discovered, and a single-binary repo has one at its root. Pass
+# SERVICES to restrict the list. Example: make parity REPO=../my-platform
 parity:
 	@test -n "$(REPO)" || { echo "usage: make parity REPO=path/to/repo [SERVICES=dir1,dir2]"; exit 2; }
 	@echo "==> Checking op/schema parity against swag output in $(REPO)..."

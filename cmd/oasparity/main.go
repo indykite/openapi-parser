@@ -22,7 +22,10 @@
 //	oasparity -repo path/to/repo -services svc/a,svc/b # explicit list
 //
 // Without -services, every directory under -repo containing the baseline
-// (the -docs relative path) is checked. A service fails when an operation
+// (the -docs relative path) is checked. A "service" is just such a
+// directory — any subtree with annotated Go code and its own baseline; a
+// single-binary repo is one service at its root. A service fails when an
+// operation
 // differs in either direction, or when a baseline schema has no oasgen
 // counterpart. Extra oasgen components are reported but allowed
 // (unreferenced components are valid). Exits 1 on any failure so it can
