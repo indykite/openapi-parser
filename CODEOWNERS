@@ -1,0 +1,20 @@
+# Each line is a file pattern followed by one or more owners.
+# Later match takes precedence over earlier rule.
+
+# Global rule set for everything
+*   @indykite/devx
+
+#
+# CI/CD, SAST & linting configs
+/.github/               @indykite/devx @indykite/ops
+.pre-commit-config.yaml @indykite/devx @indykite/ops
+.golangci.yml           @indykite/devx @indykite/ops
+.checkov.yaml           @indykite/devx @indykite/ops
+.deepsource.toml        @indykite/devx @indykite/ops
+.hadolint.yaml          @indykite/devx @indykite/ops
+.shellcheckrc           @indykite/devx @indykite/ops
+.trivy.yaml             @indykite/devx @indykite/ops
+.trivy_data.yaml        @indykite/devx @indykite/ops
+.trivyignore.yaml       @indykite/devx @indykite/ops
+.yamlfmt.yml            @indykite/devx @indykite/ops
+.yamllint.yml           @indykite/devx @indykite/ops
