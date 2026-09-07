@@ -79,21 +79,51 @@ func enumTarget(s *Schema) *Schema {
 	return s
 }
 
+// isRequiredRule reports whether a validator rule list makes the field itself
+// mandatory. Only rules before the first `dive` apply to the field: everything
+// after it constrains the elements (or, between `keys` and `endkeys`, the map
+// keys), so `omitempty,dive,keys,required,endkeys,required` on a map means
+// "if present, every key and value must be non-empty", not "field required".
+func isRequiredRule(rules string) bool {
+	for rule := range strings.SplitSeq(rules, ",") {
+		switch strings.TrimSpace(rule) {
+		case "dive":
+			return false
+		case "required":
+			return true
+		}
+	}
+	return false
+}
+
 // applyValidationRules maps the widely-used go-playground/validator rules to
 // schema constraints. `required` is handled by the caller (it belongs to the
 // parent object); unknown/custom validators are ignored. `dive` redirects the
 // remaining rules to the element schema, matching the validator's semantics
-// (`min=1,dive,min=8` = at least one element, each at least 8 long).
+// (`min=1,dive,min=8` = at least one element, each at least 8 long); on a map
+// the elements are the values (additionalProperties). Rules between `keys`
+// and `endkeys` constrain map keys and are skipped.
 func applyValidationRules(s *Schema, rules string) {
 	if s == nil || rules == "" {
 		return
 	}
+	inKeys := false
 	for rule := range strings.SplitSeq(rules, ",") {
 		name, val, _ := strings.Cut(strings.TrimSpace(rule), "=")
-		if name == "dive" {
-			if s = s.Items; s == nil {
+		switch name {
+		case "dive":
+			if s = elementSchema(s); s == nil {
 				return
 			}
+			continue
+		case "keys":
+			inKeys = true
+			continue
+		case "endkeys":
+			inKeys = false
+			continue
+		}
+		if inKeys {
 			continue
 		}
 		switch name {
@@ -124,6 +154,14 @@ func applyValidationRules(s *Schema, rules string) {
 			}
 		}
 	}
+}
+
+// elementSchema is what `dive` descends into: array items, or map values.
+func elementSchema(s *Schema) *Schema {
+	if s.Items != nil {
+		return s.Items
+	}
+	return s.AdditionalProperties
 }
 
 type sizeBound bool

@@ -71,6 +71,10 @@ type Account struct {
 	Code string `json:"code,omitempty" validate:"required"`
 	// Hosts: validator dive scopes min=8 to each element, not the array.
 	Hosts []string `json:"hosts" binding:"min=1,dive,min=8"`
+	// Params: optional map whose keys and values, when present, must be
+	// non-empty. The `required` rules after dive must not make the field
+	// itself required; max=64 applies to each value.
+	Params map[string]string `json:"params" binding:"omitempty,dive,keys,required,endkeys,required,max=64"`
 	// Contact is a required pointer: validation rejects null, so no null type.
 	Contact *string `json:"contact" validate:"required"`
 	// Parent account, required: the null branch is dropped, this doc survives.

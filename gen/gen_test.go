@@ -326,6 +326,20 @@ func TestEscapedTagsUnexportedDiveRequired(t *testing.T) {
 		t.Errorf("dive should put min=8 on items.minLength: %+v", hosts.Items)
 	}
 
+	// `required` after dive (and inside keys/endkeys) constrains map keys and
+	// values, not the field: params stays optional.
+	if slices.Contains(acct.Required, "params") {
+		t.Errorf("params must not be required, got %v", acct.Required)
+	}
+	params := acct.Properties["params"]
+	values := params.AdditionalProperties
+	if values == nil || values.MaxLength == nil || *values.MaxLength != 64 {
+		t.Errorf("dive on a map should put max=64 on additionalProperties.maxLength: %+v", values)
+	}
+	if params.MaxLength != nil || params.MinLength != nil {
+		t.Errorf("map itself must carry no string constraints: %+v", params)
+	}
+
 	// unexported fields are never marshaled.
 	if _, ok := acct.Properties["hidden"]; ok {
 		t.Error("unexported field must not appear in the schema")
