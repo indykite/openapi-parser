@@ -323,8 +323,10 @@ func (r *resolver) addField(schema *Schema, field *ast.Field, ctx refCtx, subst 
 	schema.Properties[name] = fieldSchema
 
 	// like swag, `required` wins even over json omitempty - a request field
-	// can be mandatory while the response marshaler omits empty values
-	if hasTag(tag, "validate", "required") || hasTag(tag, "binding", "required") {
+	// can be mandatory while the response marshaler omits empty values.
+	// Only a top-level `required` counts: one after `dive` (or inside
+	// keys/endkeys) constrains the elements, not the field.
+	if isRequiredRule(tagValue(tag, "validate")) || isRequiredRule(tagValue(tag, "binding")) {
 		schema.Required = append(schema.Required, name)
 		// A required pointer field rejects JSON null at validation time,
 		// so drop the null branch the pointer type added.

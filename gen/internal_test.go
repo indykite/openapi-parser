@@ -177,6 +177,31 @@ func TestApplyValidationRulesTable(t *testing.T) {
 	}
 	applyValidationRules(&Schema{Type: []string{"array"}}, "dive,min=1") // nil items: no panic
 
+	// dive on a map descends into additionalProperties; keys..endkeys rules
+	// constrain map keys and must not leak onto the values.
+	m := &Schema{Type: []string{"object"}, AdditionalProperties: &Schema{Type: []string{"string"}}}
+	applyValidationRules(m, "omitempty,dive,keys,required,max=3,endkeys,required,max=64")
+	if m.MaxLength != nil || m.AdditionalProperties.MaxLength == nil || *m.AdditionalProperties.MaxLength != 64 {
+		t.Errorf("map dive rules: %+v values %+v", m, m.AdditionalProperties)
+	}
+	applyValidationRules(&Schema{Type: []string{"object"}}, "dive,keys,required,endkeys,min=1") // nil values: no panic
+
+	// required only counts before dive: after it, it applies to elements.
+	for rules, want := range map[string]bool{
+		"required":                true,
+		"required,dive,min=1":     true,
+		" required , max=3":       true,
+		"omitempty,dive,required": false,
+		"omitempty,dive,keys,required,endkeys,required": false,
+		"min=1,dive,required":                           false,
+		"":                                              false,
+		"required_if=Other x":                           false,
+	} {
+		if got := isRequiredRule(rules); got != want {
+			t.Errorf("isRequiredRule(%q) = %v, want %v", rules, got, want)
+		}
+	}
+
 	// custom validators must be ignored without panicking
 	ignored := &Schema{Type: []string{"string"}}
 	applyValidationRules(ignored, "required,gid=PROJECT,node_type,omitempty")

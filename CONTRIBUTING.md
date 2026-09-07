@@ -17,7 +17,7 @@ Thanks for your interest in improving `openapi-parser`. When contributing to thi
 
 ## Development setup
 
-You need Go 1.26 or later.
+You need Go 1.27 or later.
 
 ```sh
 git clone https://github.com/indykite/openapi-parser
