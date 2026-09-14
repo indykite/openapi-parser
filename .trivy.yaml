@@ -53,9 +53,6 @@ rego:
 pkg:
   include-dev-deps: true # supported: npm, yarn, gradle
 
-pkg:
-  include-dev-deps: true # supported: npm, yarn, gradle
-
 # https://trivy.dev/latest/docs/references/configuration/config-file/#license-options
 license:
   confidenceLevel: 0.9 # '--license-confidence-level'
