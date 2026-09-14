@@ -56,7 +56,6 @@ repos:
 
       # SAST
       - id: trivy
-      - id: trivy-licenses
         name: trivy
         entry: trivy filesystem --disable-telemetry --skip-version-check --exit-code=1 --config .trivy.yaml .
         language: system
