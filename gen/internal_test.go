@@ -20,6 +20,7 @@ package gen
 // stdlib practice and the testpackage linter's default exemption.
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -106,6 +107,28 @@ func TestCoerceScalarArrayTable(t *testing.T) {
 		{intArr, []any{int64(1), int64(2)}, "1, 2"},                // items trimmed and coerced
 		{intArr, []any{int64(1), "2x"}, "1,2x"},                    // unparseable item stays string
 		{&Schema{Type: []string{"array"}}, []any{"a", "b"}, "a,b"}, // nil Items: items stay strings
+		// object schemas take JSON text; anything else stays a string.
+		{&Schema{Type: []string{"object"}}, map[string]any{"k": json.Number("1"), "s": "v"}, `{"k":1,"s":"v"}`},
+		{&Schema{Type: []string{"object"}}, "not json", "not json"},
+		// a JSON array, JSON null and trailing garbage are not objects; a
+		// leading space is fine.
+		{&Schema{Type: []string{"object"}}, "[1,2]", "[1,2]"},
+		{&Schema{Type: []string{"object"}}, "null", "null"},
+		{&Schema{Type: []string{"object"}}, `{"a":1} x`, `{"a":1} x`},
+		// a stray closing delimiter after a complete value is trailing garbage
+		// too; Decoder.More() alone would let these through.
+		{&Schema{Type: []string{"object"}}, `{"a":1}]`, `{"a":1}]`},
+		{&Schema{Type: []string{"object"}}, `{"a":1}}`, `{"a":1}}`},
+		{intArr, []any{"[1", "2]}"}, "[1,2]}"},
+		{&Schema{Type: []string{"object"}}, map[string]any{"a": json.Number("1")}, ` {"a":1}`},
+		// integers beyond 2^53 must survive verbatim, not round through float64.
+		{&Schema{Type: []string{"object"}}, map[string]any{"id": json.Number("9007199254740993")}, `{"id":9007199254740993}`},
+		// arrays accept JSON text too, so array,object examples and [1,2]
+		// don't get split on the commas inside them.
+		{intArr, []any{json.Number("1"), json.Number("2")}, "[1,2]"},
+		{&Schema{Type: []string{"array"}, Items: &Schema{Type: []string{"object"}}},
+			[]any{map[string]any{"id": json.Number("1"), "n": "x"}}, `[{"id":1,"n":"x"}]`},
+		{strArr, []any{"[1", "2"}, "[1,2"}, // unterminated: back to the comma form
 	}
 	for _, c := range cases {
 		if got := coerceScalar(c.in, c.schema); !reflect.DeepEqual(got, c.want) {
@@ -537,6 +560,10 @@ func TestYAMLStringTable(t *testing.T) {
 		"":                 `""`,
 		"$ref":             `"$ref"`,
 		"line1\nline2":     `"line1\nline2"`,
+		// &, < and > must not be HTML-escaped to \u0026 etc.: they are plain
+		// characters in a YAML double-quoted scalar.
+		"a=1&b=2":     `"a=1&b=2"`,
+		"<id> or >=3": `"<id> or >=3"`,
 	}
 	for in, want := range cases {
 		if got := yamlString(in); got != want {
@@ -560,7 +587,7 @@ func TestYAMLScalarAndEmpties(t *testing.T) {
 func TestEmitJSONRoundTrip(t *testing.T) {
 	api := &API{
 		Schemas: map[string]*Schema{},
-		Info:    Info{Title: "T", Version: "1"},
+		Info:    Info{Title: "T", Version: "1", Description: "a=1&b=2 <x>"},
 	}
 	data, err := api.EmitJSON(EmitOptions{})
 	if err != nil {
@@ -568,6 +595,18 @@ func TestEmitJSONRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"openapi": "3.2.0"`) {
 		t.Errorf("default version missing: %s", data)
+	}
+	// &, < and > stay literal, matching EmitYAML; no &-style escapes.
+	if !strings.Contains(string(data), `"a=1&b=2 <x>"`) || strings.Contains(string(data), `\u00`) {
+		t.Errorf("JSON must not HTML-escape: %s", data)
+	}
+	// Same shape as json.MarshalIndent: no trailing newline.
+	if strings.HasSuffix(string(data), "\n") {
+		t.Errorf("unexpected trailing newline")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
 	}
 }
 
@@ -624,6 +663,47 @@ func TestSchemaFromSwaggertypeTable(t *testing.T) {
 	if !reflect.DeepEqual(unknown.Type, []string{"string"}) {
 		t.Errorf("unknown swaggertype should degrade to string: %+v", unknown)
 	}
+	// swag accepts "object" for json.RawMessage-style fields; it must not
+	// degrade to string.
+	obj := schemaFromSwaggertype("object")
+	if !reflect.DeepEqual(obj.Type, []string{"object"}) || obj.Format != "" {
+		t.Errorf("object: %+v", obj)
+	}
+	arrObj := schemaFromSwaggertype("array,object")
+	if arrObj.Items == nil || !reflect.DeepEqual(arrObj.Items.Type, []string{"object"}) {
+		t.Errorf("array,object should have object items: %+v", arrObj.Items)
+	}
+	// An unknown array element name must not emit an empty type.
+	arrUnknown := schemaFromSwaggertype("array,mystery")
+	if arrUnknown.Items == nil || !reflect.DeepEqual(arrUnknown.Items.Type, []string{"string"}) {
+		t.Errorf("array,unknown should degrade to string items: %+v", arrUnknown.Items)
+	}
+	// swag's map form: object,<value type> is a map with typed values.
+	objMap := schemaFromSwaggertype("object,string")
+	if !reflect.DeepEqual(objMap.Type, []string{"object"}) || objMap.AdditionalProperties == nil ||
+		!reflect.DeepEqual(objMap.AdditionalProperties.Type, []string{"string"}) {
+		t.Errorf("object,string should be a map of strings: %+v values %+v", objMap, objMap.AdditionalProperties)
+	}
+	if obj.AdditionalProperties != nil {
+		t.Errorf("bare object must stay free-form: %+v", obj.AdditionalProperties)
+	}
+	// The tail is parsed recursively, so nested arrays keep every dimension.
+	nested := schemaFromSwaggertype("array,array,integer")
+	if nested.Items == nil || !reflect.DeepEqual(nested.Items.Type, []string{"array"}) ||
+		nested.Items.Items == nil || !reflect.DeepEqual(nested.Items.Items.Type, []string{"integer"}) {
+		t.Errorf("array,array,integer should nest: %+v", nested)
+	}
+	arrMap := schemaFromSwaggertype("array,object,int64")
+	if arrMap.Items == nil || arrMap.Items.AdditionalProperties == nil ||
+		arrMap.Items.AdditionalProperties.Format != "int64" {
+		t.Errorf("array,object,int64 should be an array of int64 maps: %+v", arrMap.Items)
+	}
+	// Whitespace around the separator is tolerated (swag rejects it, but a
+	// silent downgrade to string items would be worse than leniency).
+	spaced := schemaFromSwaggertype("array, int64")
+	if spaced.Items == nil || spaced.Items.Format != "int64" {
+		t.Errorf("array, int64 with a space should keep the item type: %+v", spaced.Items)
+	}
 }
 
 func TestSanitizeComponentKey(t *testing.T) {
@@ -642,5 +722,45 @@ func TestParseAttributesAndFields(t *testing.T) {
 	}
 	if attrs["minimum"] != "1" || attrs["enums"] != "a,b" {
 		t.Errorf("attrs: %v", attrs)
+	}
+}
+
+func TestYAMLControlCharactersEscaped(t *testing.T) {
+	// DEL and the C1 range are forbidden raw in a YAML double-quoted scalar;
+	// encoding/json leaves them alone, so the YAML path must escape them.
+	// Bytes are spelled in octal so no editor or tool decodes them.
+	const bs = "\134" // backslash
+	esc := func(hex string) string { return bs + "u" + hex }
+	cases := map[string]string{
+		"a\177b":       `"a` + esc("007F") + `b"`,
+		"x\302\200y":   `"x` + esc("0080") + `y"`,
+		"nel\302\205":  `"nel` + esc("0085") + `"`,
+		"end\302\237":  `"end` + esc("009F") + `"`,
+		"tab\tok":      `"tab` + bs + `tok"`, // C0: json already escapes
+		"caf\303\251":  "\"caf\303\251\"",    // U+00A0 and above stay raw
+		"nbsp\302\240": "\"nbsp\302\240\"",   // first code point past the C1 range
+		// the non-characters U+FFFE/U+FFFF are also rejected raw by yaml.v3
+		"nc\357\277\276":  `"nc` + esc("FFFE") + `"`,
+		"nc\357\277\277":  `"nc` + esc("FFFF") + `"`,
+		"bom\357\273\277": "\"bom\357\273\277\"", // U+FEFF is accepted, left raw
+	}
+	for in, want := range cases {
+		if got := yamlString(in); got != want {
+			t.Errorf("yamlString(%q) = %s, want %s", in, got, want)
+		}
+	}
+	if got := escapeYAMLControls("plain"); got != "plain" {
+		t.Errorf("no-op path changed the input: %q", got)
+	}
+
+	// End to end: the emitted document must carry the escape, not the byte.
+	api := &API{Schemas: map[string]*Schema{}, Info: Info{Title: "T", Version: "1", Description: "bad\177\302\222"}}
+	data, err := api.EmitYAML(EmitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if strings.ContainsAny(out, "\177\302\222") || !strings.Contains(out, `"bad`+esc("007F")+esc("0092")+`"`) {
+		t.Errorf("control characters leaked into YAML: %q", data)
 	}
 }

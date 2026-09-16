@@ -17,6 +17,7 @@
 package gen
 
 import (
+	"bytes"
 	"encoding/json"
 	"maps"
 	"net/http"
@@ -90,9 +91,26 @@ func (api *API) Emit(opt EmitOptions) map[string]any {
 // Produces returns a default response content type.
 func (*API) Produces() string { return "application/json" }
 
-// EmitJSON renders to indented JSON bytes.
+// EmitJSON renders to indented JSON bytes. Like EmitYAML it leaves &, < and
+// > unescaped so the two formats render a description identically (swag's
+// json.MarshalIndent would write "a=1&b=2"). A consumer that inlines
+// the document into an HTML page must escape it itself.
 func (api *API) EmitJSON(opt EmitOptions) ([]byte, error) {
-	return json.MarshalIndent(api.Emit(opt), "", "  ")
+	return encodeJSON(api.Emit(opt), "  ")
+}
+
+// encodeJSON is json.Marshal with HTML-safe escaping off and no trailing
+// newline; indent is the per-level indentation, "" for compact output. It
+// is the single JSON text policy shared by EmitJSON and the YAML scalars.
+func encodeJSON(v any, indent string) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", indent)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
 func emitInfo(in *Info) map[string]any {

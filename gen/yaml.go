@@ -15,7 +15,7 @@
 package gen
 
 import (
-	"encoding/json"
+	"fmt"
 	"maps"
 	"regexp"
 	"slices"
@@ -109,13 +109,48 @@ func yamlScalar(v any) string {
 	default:
 		// bools, numbers, and any leftover structured value: JSON is valid
 		// YAML flow style, and encoding/json handles every scalar correctly.
-		data, err := json.Marshal(t)
+		data, err := marshalNoHTMLEscape(t)
 		if err != nil {
 			return "null"
 		}
-		return string(data)
+		return data
 	}
 }
+
+// marshalNoHTMLEscape renders v as compact JSON text via encodeJSON, then
+// escapes what YAML additionally forbids. &, < and > stay literal: they are
+// ordinary characters in a YAML double-quoted scalar,
+// and a description reading "a=1\u0026b=2" is correct but unreadable.
+func marshalNoHTMLEscape(v any) (string, error) {
+	data, err := encodeJSON(v, "")
+	if err != nil {
+		return "", err
+	}
+	return escapeYAMLControls(string(data)), nil
+}
+
+// escapeYAMLControls rewrites the characters encoding/json leaves raw but
+// YAML 1.2 forbids in a double-quoted scalar: DEL (U+007F), the C1 range
+// (U+0080..U+009F) and the non-characters U+FFFE and U+FFFF. They only ever
+// occur inside a string, so the pass is safe on a whole JSON fragment.
+// Strict loaders such as yaml.v3 reject a document that contains them raw.
+func escapeYAMLControls(s string) string {
+	if !strings.ContainsFunc(s, isYAMLControl) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		if isYAMLControl(r) {
+			fmt.Fprintf(&b, `\u%04X`, r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func isYAMLControl(r rune) bool { return (r >= 0x7F && r <= 0x9F) || r == 0xFFFE || r == 0xFFFF }
 
 // yamlPlain matches strings that are unambiguous unquoted: they can't be
 // mistaken for numbers, and contain no YAML indicator characters.
@@ -131,9 +166,9 @@ func yamlString(s string) string {
 	if yamlPlain.MatchString(s) && !yamlReserved[strings.ToLower(s)] {
 		return s
 	}
-	data, err := json.Marshal(s)
+	data, err := marshalNoHTMLEscape(s)
 	if err != nil {
 		return `""`
 	}
-	return string(data)
+	return data
 }

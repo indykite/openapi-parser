@@ -1,6 +1,10 @@
 package testdata
 
-import "github.com/indykite/openapi-parser/testdata/model"
+import (
+	"encoding/json"
+
+	"github.com/indykite/openapi-parser/testdata/model"
+)
 
 // @title        Example API
 // @summary      Accounts and things, for parser exercise.
@@ -65,6 +69,9 @@ type Account struct {
 	Meta     map[string]string      `json:"meta"`
 	Attrs    map[string]interface{} `json:"attrs"`
 	Raw      []byte                 `json:"raw" swaggertype:"string" format:"base64"`
+	// Policy is stored JSON inlined as an object; swaggertype:"object" is the
+	// swag idiom for json.RawMessage fields and must not degrade to string.
+	Policy json.RawMessage `json:"policy" swaggertype:"object" example:"{\"tier\":\"gold\",\"limit\":5}"`
 	// Config has an escaped-JSON example; tags after it must still parse.
 	Config string `json:"config" example:"{\"key\":\"value\"}" binding:"required,min=1,max=100"`
 	// Code is required even though json omits it when empty (swag semantics).

@@ -19,6 +19,7 @@ package gen
 // to JSON Schema keywords.
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 )
@@ -43,6 +44,11 @@ func coerceScalar(v string, s *Schema) any {
 			return b
 		}
 	case "array":
+		// JSON text is accepted first (`example:"[1,2]"`, or a list of
+		// objects on an array,object field), then swag's comma form.
+		if arr, ok := decodeJSON(v, '['); ok {
+			return arr
+		}
 		item := s.Items
 		if item == nil {
 			item = &Schema{}
@@ -53,8 +59,36 @@ func coerceScalar(v string, s *Schema) any {
 			arr = append(arr, coerceScalar(strings.TrimSpace(p), item))
 		}
 		return arr
+	case "object":
+		// An object example is JSON text: `example:"{\"k\":1}"` emits
+		// {"k": 1}, not the quoted string. (swag's key:value,key:value form
+		// is not supported; it falls through and stays a string.)
+		if obj, ok := decodeJSON(v, '{'); ok {
+			return obj
+		}
 	}
 	return v
+}
+
+// decodeJSON parses v as a JSON value when it starts with the given opening
+// delimiter and decodes as a whole. Numbers are kept as json.Number so
+// integers beyond 2^53 survive verbatim into the emitted spec. JSON null and
+// an empty document are reported as no match so callers keep the raw text.
+func decodeJSON(v string, open byte) (any, bool) {
+	v = strings.TrimSpace(v)
+	// json.Valid checks the whole input is exactly one value: Decoder alone
+	// would stop after the first value and accept trailing text such as
+	// `{"a":1}]`.
+	if v == "" || v[0] != open || !json.Valid([]byte(v)) {
+		return nil, false
+	}
+	dec := json.NewDecoder(strings.NewReader(v))
+	dec.UseNumber()
+	var out any
+	if err := dec.Decode(&out); err != nil || out == nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // primaryType is the schema's first non-null type, or "".
