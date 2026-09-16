@@ -15,6 +15,7 @@
 package gen_test
 
 import (
+	"encoding/json"
 	"maps"
 	"slices"
 	"strings"
@@ -870,6 +871,14 @@ func TestMapAndSwaggertypeFields(t *testing.T) {
 	raw := acct.Properties["raw"]
 	if !slices.Contains(raw.Type, "string") || raw.Format != "base64" {
 		t.Errorf("swaggertype override should win over []byte: %+v", raw)
+	}
+	policy := acct.Properties["policy"]
+	if !slices.Contains(policy.Type, "object") || policy.Format != "" {
+		t.Errorf("swaggertype:\"object\" on json.RawMessage should emit type object: %+v", policy)
+	}
+	// The example is JSON text and must decode to an object, not stay a string.
+	if ex, ok := policy.Example.(map[string]any); !ok || ex["tier"] != "gold" || ex["limit"] != json.Number("5") {
+		t.Errorf("object example should decode from JSON: %#v", policy.Example)
 	}
 }
 

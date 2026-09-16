@@ -802,25 +802,34 @@ func applyExtensionsTag(s *Schema, spec string) {
 	}
 }
 
+// schemaFromSwaggertype builds a schema from a swaggertype tag. The grammar
+// is swag's, applied recursively on the comma-separated tail: `array,<rest>`
+// wraps the rest in items, `object` alone is a free-form object (the idiom
+// for json.RawMessage fields) and `object,<rest>` a map whose values are the
+// rest, `primitive,<rest>` is just the rest, and a bare name is a JSON or Go
+// primitive. Anything unknown degrades to string rather than erroring.
 func schemaFromSwaggertype(spec string) *Schema {
-	parts := strings.Split(spec, ",")
-	switch parts[0] {
+	head, rest, _ := strings.Cut(spec, ",")
+	head, rest = strings.TrimSpace(head), strings.TrimSpace(rest)
+	switch head {
 	case "array":
-		inner := "string"
-		if len(parts) > 1 {
-			inner = parts[1]
+		if rest == "" {
+			rest = "string"
 		}
-		t, f, _ := primitiveType(inner)
-		return &Schema{Type: []string{"array"}, Items: &Schema{Type: []string{t}, Format: f}}
+		return &Schema{Type: []string{"array"}, Items: schemaFromSwaggertype(rest)}
+	case "object":
+		s := &Schema{Type: []string{"object"}}
+		if rest != "" {
+			s.AdditionalProperties = schemaFromSwaggertype(rest)
+		}
+		return s
 	case "primitive":
-		if len(parts) > 1 {
-			t, f, _ := primitiveType(parts[1])
-			return &Schema{Type: []string{t}, Format: f}
+		if rest != "" {
+			return schemaFromSwaggertype(rest)
 		}
-	default:
-		if t, f, ok := primitiveType(parts[0]); ok {
-			return &Schema{Type: []string{t}, Format: f}
-		}
+	}
+	if t, f, ok := primitiveType(head); ok {
+		return &Schema{Type: []string{t}, Format: f}
 	}
 	return &Schema{Type: []string{"string"}}
 }
